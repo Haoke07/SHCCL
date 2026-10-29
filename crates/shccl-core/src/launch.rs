@@ -14,6 +14,11 @@ use crate::progress::{LogStream, ProgressEvent, ProgressSink};
 use crate::util::read_json;
 use crate::version::{AssetIndex, VersionDetails};
 
+/// Launcher name reported to the game.
+const LAUNCHER_BRAND: &str = "SHCCL";
+/// Launcher version reported to the game.
+const LAUNCHER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Everything needed to start one game process.
 #[derive(Debug, Clone)]
 pub struct LaunchRequest {
@@ -170,7 +175,6 @@ pub(crate) fn build_plan(
         ("user_type", request.account.user_type().to_string()),
         ("user_properties", "{}".to_string()),
         ("clientid", "shccl".to_string()),
-        ("version_type", details.version_type().to_string()),
         (
             "natives_directory",
             natives_dir.to_string_lossy().into_owned(),
@@ -181,8 +185,9 @@ pub(crate) fn build_plan(
             paths.libraries_dir().to_string_lossy().into_owned(),
         ),
         ("classpath_separator", CLASSPATH_SEPARATOR.to_string()),
-        ("launcher_name", "SHCCL".to_string()),
-        ("launcher_version", env!("CARGO_PKG_VERSION").to_string()),
+        ("launcher_name", LAUNCHER_BRAND.to_string()),
+        ("launcher_version", LAUNCHER_VERSION.to_string()),
+        ("version_type", launcher_version_type()),
         ("resolution_width", request.width.unwrap_or(854).to_string()),
         (
             "resolution_height",
@@ -235,11 +240,8 @@ pub(crate) fn build_plan(
         jvm_args.push(classpath.clone());
     }
 
-    jvm_args.push("-Dminecraft.launcher.brand=SHCCL".to_string());
-    jvm_args.push(format!(
-        "-Dminecraft.launcher.version={}",
-        env!("CARGO_PKG_VERSION")
-    ));
+    jvm_args.push(format!("-Dminecraft.launcher.brand={LAUNCHER_BRAND}"));
+    jvm_args.push(format!("-Dminecraft.launcher.version={LAUNCHER_VERSION}"));
 
     jvm_args.extend(config.jvm_args.iter().cloned());
     jvm_args.extend(request.jvm_args.iter().cloned());
@@ -344,6 +346,17 @@ where
     });
 }
 
+/// Value substituted for `${version_type}` in the game arguments.
+///
+/// Launchers such as HMCL replace the version type with their own name and
+/// version, so versions whose title screen renders `Minecraft <version>/<type>`
+/// (for example 1.14.4 and 1.20) display the launcher version. Newer versions
+/// may ignore the suffix, but the argument is still passed for consistency and
+/// for tools/mods that read it.
+fn launcher_version_type() -> String {
+    format!("{LAUNCHER_BRAND} {LAUNCHER_VERSION}")
+}
+
 fn game_assets_dir(paths: &LauncherPaths, index_name: &str) -> PathBuf {
     let index_path = paths.indexes_dir().join(format!("{index_name}.json"));
     if let Ok(index) = read_json::<AssetIndex>(&index_path)
@@ -420,7 +433,7 @@ mod tests {
             }],
             "arguments": {
                 "jvm": ["-Djava.library.path=${natives_directory}", "-cp", "${classpath}"],
-                "game": ["--username", "${auth_player_name}", "--uuid", "${auth_uuid}", "--gameDir", "${game_directory}"]
+                "game": ["--username", "${auth_player_name}", "--uuid", "${auth_uuid}", "--gameDir", "${game_directory}", "--versionType", "${version_type}"]
             }
         }))
         .unwrap();
@@ -451,11 +464,23 @@ mod tests {
         let joined = plan.args.join(" ");
         assert!(joined.contains("net.minecraft.client.main.Main"));
         assert!(joined.contains("--username Steve"));
+        assert!(joined.contains(&format!(
+            "--versionType {LAUNCHER_BRAND} {LAUNCHER_VERSION}"
+        )));
+        assert!(joined.contains(&format!("-Dminecraft.launcher.version={LAUNCHER_VERSION}")));
         assert!(joined.contains("5627dd98e6be3c21b8a8e92344183641"));
         assert!(joined.contains(library.to_string_lossy().as_ref()));
         assert!(!joined.contains("${"));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn launcher_version_is_injected_into_version_type() {
+        assert_eq!(
+            launcher_version_type(),
+            format!("{LAUNCHER_BRAND} {LAUNCHER_VERSION}")
+        );
     }
 
     #[test]

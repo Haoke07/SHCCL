@@ -161,6 +161,16 @@ native 处理同时兼容两种格式：
 - 1.19 之前：从 `downloads.classifiers` 下载并解压到 `versions/<id>/natives`；
 - 1.19 及之后：native jar 作为独立 library 加入 classpath，由 LWJGL 在运行时解压。
 
+## 启动器版本注入
+
+与 HMCL 一致，启动时会向游戏注入启动器信息：
+
+- JVM 系统属性 `-Dminecraft.launcher.brand=SHCCL` 和 `-Dminecraft.launcher.version=<版本>`，供游戏、模组与崩溃报告读取；
+- 版本 JSON 的 `${version_type}` 会被替换为 `SHCCL <版本>`，即游戏参数 `--versionType "SHCCL <版本>"`。在标题画面会拼接 `/<versionType>` 的版本（如 1.14.4、1.20）上，左下角会显示 `Minecraft <游戏版本>/SHCCL <版本>`；新版本即使不渲染该后缀，参数仍会照常传入；
+- `${launcher_name}`、`${launcher_version}` 占位符也会被替换为对应值。
+
+注意：`${version_type}` 被覆盖后，原来的 `release` / `snapshot` / 加载器类型不再出现在该参数中，这与 HMCL 的行为一致。
+
 ## TUI
 
 ```bash
