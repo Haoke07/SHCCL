@@ -2,7 +2,7 @@
 
 **Smart Home Control Craft Launcher** — 一个用 Rust 编写的 Minecraft 启动器。
 
-SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前阶段以 **CLI 优先**，账号系统先支持 **离线模式**，Microsoft 登录、模组加载器与完整的 TUI/GUI 功能作为后续扩展点。
+SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前阶段以 **CLI 优先**，账号系统先支持 **离线模式**，Microsoft 登录、模组加载器与完整的 TUI 功能作为后续扩展点。
 
 ## 当前状态
 
@@ -11,7 +11,7 @@ SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前
 | `shccl-core` | 可用 | 版本清单、版本 JSON、客户端/库/资源下载、natives 解压、离线账号、Java 检测、启动命令构建与进程启动 |
 | `shccl-cli` | 可用 | 安装、离线登录、账号选择、启动、配置、诊断 |
 | `shccl-tui` | 骨架 | 基于 ratatui/crossterm 的状态面板，可浏览已安装版本与当前账号 |
-| `shccl-gui` | 骨架 | 基于 SDL3 的窗口与调试字体渲染，展示状态与已安装版本 |
+| `shccl-gui` | 可用 | 基于 SDL3 的完整界面：仪表盘、版本安装/启动、离线账号、设置、日志与进度 |
 
 > 离线账号仅用于离线游戏与离线服务器。Microsoft 登录尚未实现。
 
@@ -187,7 +187,28 @@ cargo run -p shccl-gui
 cargo run -p shccl-gui -- --root /path/to/.minecraft
 ```
 
-SDL3 窗口使用内置 debug 字体渲染，`R` 刷新，`Q`/`Esc` 退出。
+GUI 与 CLI 功能同步，所有操作都会写入同一份 `shccl.json` 和 `accounts.json`：
+
+| 页面 | 对应 CLI | 功能 |
+| --- | --- | --- |
+| Dashboard | `doctor` | Root、配置文件、Java 检测、账号、已安装版本、内存与默认版本 |
+| Versions | `versions` / `install` / `launch` | 浏览已安装版本、加载远端清单、过滤、安装、修复/校验、启动、预览启动命令、设为默认 |
+| Accounts | `login offline` / `accounts` / `select` | 添加并选中离线账号、切换当前账号 |
+| Settings | `config ...` | Java 路径、内存、下载并发、默认版本、游戏目录，以及查看配置 JSON |
+| Logs | - | 安装进度、启动命令、游戏 stdout/stderr |
+
+操作方式：
+
+- 鼠标点击侧边栏、列表行和按钮；滚轮滚动列表与日志。
+- `1`–`5` 切换页面，`Tab` 循环切换；`↑`/`↓` 或 `j`/`k` 移动选择。
+- `Enter` 执行当前操作（安装/启动/选择账号）；Versions 页面中 `I` 安装指定版本、`L` 加载远端清单、`F` 过滤、`D` 设为默认、`P` 预览启动命令。
+- Accounts 页面 `A` 添加离线账号；Logs 页面 `C` 清空日志。
+- `R` 刷新本地状态并重新检测 Java；`Q`/`Esc` 退出（弹窗打开时 `Esc` 关闭弹窗）。
+- 输入框支持 `Ctrl+A` 全选，`←`/`→`、`Home`/`End` 移动光标，`Enter` 保存。
+
+启动游戏时使用 `capture_output`，游戏日志会实时显示在 Logs 页面；启动未安装的版本时会像 CLI 一样先自动安装。
+
+> 当前界面使用 SDL 内置的 8×8 debug 字体（占位，非系统字体）。接入系统等宽 TTF 字体渲染已列入下一版本计划。
 
 如果系统没有 SDL3，可启用从源码构建：
 
@@ -209,7 +230,7 @@ sdl3 = { version = "0.20", features = ["main", "build-from-source-static"] }
 - Fabric / Forge / NeoForge 等加载器安装
 - Java runtime 自动下载与版本选择
 - 完整 TUI：安装、账号、日志、启动
-- 完整 SDL3 GUI：可点击版本列表、进度条、设置页
+- GUI 接入系统等宽 TTF 字体，替换 SDL 内置 debug 字体
 - 多实例隔离与实例级配置
 
 ## License

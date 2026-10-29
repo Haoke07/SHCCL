@@ -1,173 +1,90 @@
+mod app;
+mod ui;
+
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::Result;
 use sdl3::event::Event;
-use sdl3::keyboard::Keycode;
-use sdl3::pixels::Color;
-use sdl3::render::{FPoint, FRect};
-use shccl_core::{AccountStore, InstalledVersionSummary, Launcher};
+use sdl3::mouse::MouseButton;
+use shccl_core::Launcher;
 
-const WINDOW_WIDTH: u32 = 1024;
-const WINDOW_HEIGHT: u32 = 640;
-const SCALE: f32 = 2.0;
-const WIDTH: f32 = WINDOW_WIDTH as f32 / SCALE;
-const HEIGHT: f32 = WINDOW_HEIGHT as f32 / SCALE;
+use crate::app::App;
 
-const BACKGROUND: Color = Color::RGB(14, 17, 22);
-const PANEL: Color = Color::RGB(24, 30, 38);
-const ACCENT: Color = Color::RGB(86, 214, 134);
-const TEXT: Color = Color::RGB(226, 232, 240);
-const MUTED: Color = Color::RGB(130, 143, 160);
+fn main() -> anyhow::Result<()> {
+    let root = parse_root();
 
-struct State {
-    launcher: Launcher,
-    installed: Vec<InstalledVersionSummary>,
-    accounts: AccountStore,
-    status: String,
-}
-
-impl State {
-    fn new(launcher: Launcher) -> Self {
-        let mut state = Self {
-            launcher,
-            installed: Vec::new(),
-            accounts: AccountStore::default(),
-            status: String::new(),
-        };
-        state.refresh();
-        state
-    }
-
-    fn refresh(&mut self) {
-        self.accounts = self.launcher.accounts();
-        match self.launcher.installed_versions() {
-            Ok(installed) => {
-                self.installed = installed;
-                self.status = format!(
-                    "{} installed versions | {} accounts",
-                    self.installed.len(),
-                    self.accounts.accounts.len()
-                );
-            }
-            Err(error) => {
-                self.installed.clear();
-                self.status = format!("error: {error}");
-            }
-        }
-    }
-
-    fn draw(&self, canvas: &mut sdl3::render::Canvas<sdl3::video::Window>) -> Result<()> {
-        canvas.set_draw_color(BACKGROUND);
-        canvas.clear();
-
-        canvas.set_draw_color(PANEL);
-        canvas.fill_rect(FRect::new(12.0, 12.0, WIDTH - 24.0, 56.0))?;
-        canvas.fill_rect(FRect::new(12.0, 76.0, 210.0, HEIGHT - 100.0))?;
-        canvas.fill_rect(FRect::new(230.0, 76.0, WIDTH - 242.0, HEIGHT - 100.0))?;
-
-        canvas.set_draw_color(ACCENT);
-        canvas.fill_rect(FRect::new(12.0, 12.0, 5.0, 56.0))?;
-
-        canvas.set_draw_color(TEXT);
-        canvas.draw_debug_text("SHCCL", FPoint::new(26.0, 20.0))?;
-        canvas.draw_debug_text("Smart Home Control Craft Launcher", FPoint::new(26.0, 34.0))?;
-        canvas.set_draw_color(MUTED);
-        canvas.draw_debug_text(
-            "SDL3 frontend scaffold (CLI-first build)",
-            FPoint::new(26.0, 48.0),
-        )?;
-
-        canvas.set_draw_color(ACCENT);
-        canvas.draw_debug_text("STATUS", FPoint::new(24.0, 88.0))?;
-        canvas.set_draw_color(TEXT);
-        let root = self.launcher.paths().root().display().to_string();
-        canvas.draw_debug_text(&format!("root: {root}"), FPoint::new(24.0, 108.0))?;
-        canvas.draw_debug_text(
-            &format!("memory: {} MiB", self.launcher.config().memory_mb),
-            FPoint::new(24.0, 122.0),
-        )?;
-        let account = self
-            .accounts
-            .current()
-            .map(|account| account.username.clone())
-            .unwrap_or_else(|| "none".to_string());
-        canvas.draw_debug_text(&format!("account: {account}"), FPoint::new(24.0, 136.0))?;
-        canvas.draw_debug_text(
-            &format!("installed: {}", self.installed.len()),
-            FPoint::new(24.0, 150.0),
-        )?;
-        canvas.draw_debug_text("Use the CLI:", FPoint::new(24.0, 180.0))?;
-        canvas.set_draw_color(MUTED);
-        canvas.draw_debug_text("shccl login offline <name>", FPoint::new(24.0, 198.0))?;
-        canvas.draw_debug_text("shccl install <version>", FPoint::new(24.0, 212.0))?;
-        canvas.draw_debug_text("shccl launch <version>", FPoint::new(24.0, 226.0))?;
-
-        canvas.set_draw_color(ACCENT);
-        canvas.draw_debug_text("INSTALLED VERSIONS", FPoint::new(242.0, 88.0))?;
-        canvas.set_draw_color(TEXT);
-        if self.installed.is_empty() {
-            canvas.set_draw_color(MUTED);
-            canvas.draw_debug_text("No installed versions yet.", FPoint::new(242.0, 108.0))?;
-        } else {
-            for (index, version) in self.installed.iter().take(15).enumerate() {
-                canvas.draw_debug_text(
-                    &format!("{:<20} {}", version.id, version.version_type),
-                    FPoint::new(242.0, 108.0 + index as f32 * 14.0),
-                )?;
-            }
-        }
-
-        canvas.set_draw_color(MUTED);
-        canvas.draw_debug_text(&self.status, FPoint::new(24.0, HEIGHT - 16.0))?;
-        canvas.draw_debug_text(
-            "R refresh   Q / Esc quit",
-            FPoint::new(WIDTH - 154.0, HEIGHT - 16.0),
-        )?;
-
-        canvas.present();
-        Ok(())
-    }
-}
-
-fn main() -> Result<()> {
-    let launcher = Launcher::new(parse_root())?;
-    let mut state = State::new(launcher);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let launcher = {
+        let _guard = runtime.enter();
+        Launcher::new(root)?
+    };
 
     let sdl = sdl3::init()?;
     let video = sdl.video()?;
     let window = video
         .window(
             "SHCCL - Smart Home Control Craft Launcher",
-            WINDOW_WIDTH,
-            WINDOW_HEIGHT,
+            ui::WINDOW_WIDTH,
+            ui::WINDOW_HEIGHT,
         )
         .build()?;
     let mut canvas = window.into_canvas();
-    canvas.set_scale(SCALE, SCALE)?;
-    let mut event_pump = sdl.event_pump()?;
+    let (output_width, output_height) = canvas.output_size()?;
+    canvas.set_scale(
+        output_width as f32 / ui::LOGICAL_WIDTH,
+        output_height as f32 / ui::LOGICAL_HEIGHT,
+    )?;
 
-    'running: loop {
+    // Text input is always enabled; the application only consumes it while an
+    // input dialog is open.
+    video.text_input().start(canvas.window());
+
+    let mut event_pump = sdl.event_pump()?;
+    let mut app = App::new(launcher, runtime.handle().clone());
+
+    while !app.quit {
         for event in event_pump.poll_iter() {
             match event {
-                Event::Quit { .. } => break 'running,
+                Event::Quit { .. } => app.quit = true,
                 Event::KeyDown {
-                    keycode: Some(Keycode::Escape | Keycode::Q),
+                    keycode: Some(keycode),
+                    keymod,
                     ..
-                } => break 'running,
-                Event::KeyDown {
-                    keycode: Some(Keycode::R),
+                } => app.handle_key(keycode, keymod),
+                Event::TextInput { text, .. } => app.handle_text(&text),
+                Event::MouseMotion { x, y, .. } => app.update_mouse(to_logical(x), to_logical(y)),
+                Event::MouseButtonDown {
+                    mouse_btn: MouseButton::Left,
+                    x,
+                    y,
                     ..
-                } => state.refresh(),
+                } => app.handle_click(to_logical(x), to_logical(y)),
+                Event::MouseWheel {
+                    y,
+                    mouse_x,
+                    mouse_y,
+                    ..
+                } => {
+                    app.handle_wheel(to_logical(mouse_x), to_logical(mouse_y), y);
+                }
                 _ => {}
             }
         }
 
-        state.draw(&mut canvas)?;
+        app.poll_backend();
+        app.draw(&mut canvas)?;
         std::thread::sleep(Duration::from_millis(16));
     }
 
     Ok(())
+}
+
+/// Convert window coordinates into the scaled drawing space. The window is not
+/// resizable, so the ratio is constant.
+fn to_logical(value: f32) -> f32 {
+    value * ui::LOGICAL_WIDTH / ui::WINDOW_WIDTH as f32
 }
 
 fn parse_root() -> Option<PathBuf> {
@@ -175,6 +92,17 @@ fn parse_root() -> Option<PathBuf> {
     while let Some(arg) = args.next() {
         if arg == "--root" {
             return args.next().map(PathBuf::from);
+        }
+        if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--root=")) {
+            return Some(PathBuf::from(value));
+        }
+        if arg == "--help" || arg == "-h" {
+            println!(
+                "SHCCL - Smart Home Control Craft Launcher (SDL3 GUI)\n\n\
+                 Usage: shccl-gui [--root DIR]\n\n\
+                 --root DIR   Launcher root (defaults to SHCCL_ROOT or the platform data directory)"
+            );
+            std::process::exit(0);
         }
     }
     None
