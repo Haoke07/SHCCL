@@ -1,231 +1,127 @@
+//! Terminal frontend for SHCCL.
+//!
+//! The TUI exposes the same features as the CLI and SDL GUI: dashboard,
+//! versions (installed and remote), offline accounts, settings and a live log
+//! view fed by install progress, launch previews and game stdout/stderr.
+
+mod app;
+mod ui;
+
 use std::io::{self, Stdout};
+use std::panic;
 use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph, Wrap};
-use ratatui::{Frame, Terminal};
-use shccl_core::{AccountStore, InstalledVersionSummary, Launcher};
+use shccl_core::Launcher;
 
-struct App {
-    launcher: Launcher,
-    installed: Vec<InstalledVersionSummary>,
-    accounts: AccountStore,
-    selected: usize,
-    status: String,
-}
-
-impl App {
-    fn new(launcher: Launcher) -> Self {
-        let mut app = Self {
-            launcher,
-            installed: Vec::new(),
-            accounts: AccountStore::default(),
-            selected: 0,
-            status: String::new(),
-        };
-        app.refresh();
-        app
-    }
-
-    fn refresh(&mut self) {
-        self.accounts = self.launcher.accounts();
-        match self.launcher.installed_versions() {
-            Ok(installed) => {
-                self.installed = installed;
-                if self.selected >= self.installed.len() {
-                    self.selected = self.installed.len().saturating_sub(1);
-                }
-                self.status = format!(
-                    "Loaded {} installed versions and {} accounts.",
-                    self.installed.len(),
-                    self.accounts.accounts.len()
-                );
-            }
-            Err(error) => {
-                self.installed.clear();
-                self.status = format!("Could not read installed versions: {error}");
-            }
-        }
-    }
-
-    fn draw(&self, frame: &mut Frame) {
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(3),
-                Constraint::Min(8),
-                Constraint::Length(4),
-            ])
-            .split(frame.area());
-
-        let title = Paragraph::new(Line::from(vec![
-            Span::styled(
-                "SHCCL",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  Smart Home Control Craft Launcher"),
-        ]))
-        .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(title, chunks[0]);
-
-        let body = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
-            .split(chunks[1]);
-
-        let account_name = self
-            .accounts
-            .current()
-            .map(|account| format!("{} ({})", account.username, account.uuid))
-            .unwrap_or_else(|| "none - run `shccl login offline <name>`".to_string());
-
-        let info = vec![
-            Line::from(vec![
-                Span::styled("Root: ", Style::default().fg(Color::Yellow)),
-                Span::raw(self.launcher.paths().root().display().to_string()),
-            ]),
-            Line::from(vec![
-                Span::styled("Java: ", Style::default().fg(Color::Yellow)),
-                Span::raw(format!("{:?}", self.launcher.config().java_path)),
-            ]),
-            Line::from(vec![
-                Span::styled("Memory: ", Style::default().fg(Color::Yellow)),
-                Span::raw(format!("{} MiB", self.launcher.config().memory_mb)),
-            ]),
-            Line::from(vec![
-                Span::styled("Account: ", Style::default().fg(Color::Yellow)),
-                Span::raw(account_name),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "This is the CLI-first scaffold.",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from("Use `shccl` to install, log in and launch."),
-        ];
-        frame.render_widget(
-            Paragraph::new(info)
-                .wrap(Wrap { trim: false })
-                .block(Block::default().title(" Status ").borders(Borders::ALL)),
-            body[0],
-        );
-
-        let items = if self.installed.is_empty() {
-            vec![ListItem::new("No installed versions")]
-        } else {
-            self.installed
-                .iter()
-                .enumerate()
-                .map(|(index, version)| {
-                    let style = if index == self.selected {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(Color::Green)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                    };
-                    ListItem::new(format!(
-                        "{:<22} {:<10} {}",
-                        version.id,
-                        version.version_type,
-                        version.main_class.as_deref().unwrap_or("-")
-                    ))
-                    .style(style)
-                })
-                .collect()
-        };
-        frame.render_widget(
-            List::new(items).block(
-                Block::default()
-                    .title(" Installed versions ")
-                    .borders(Borders::ALL),
-            ),
-            body[1],
-        );
-
-        let footer = Paragraph::new(vec![
-            Line::from(self.status.as_str()),
-            Line::from(Span::styled(
-                "j/k or arrows: move   r: refresh   q: quit",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ])
-        .block(Block::default().borders(Borders::ALL));
-        frame.render_widget(footer, chunks[2]);
-    }
-}
+use crate::app::App;
 
 fn main() -> Result<()> {
-    let root = parse_root();
-    let launcher = Launcher::new(root)?;
-    let mut app = App::new(launcher);
+    let root = parse_root()?;
 
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let launcher = {
+        let _guard = runtime.enter();
+        Launcher::new(root)?
+    };
+    let mut app = App::new(launcher, runtime.handle().clone());
 
+    install_panic_hook();
+    let mut terminal = setup_terminal()?;
     let result = run(&mut terminal, &mut app);
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-
+    restore_terminal(&mut terminal)?;
     result
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, app: &mut App) -> Result<()> {
     loop {
-        terminal.draw(|frame| app.draw(frame))?;
-
-        if !event::poll(Duration::from_millis(250))? {
-            continue;
-        }
-        let Event::Key(key) = event::read()? else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
+        app.poll_backend();
+        terminal.draw(|frame| ui::draw(frame, app))?;
+        if app.quit {
+            break;
         }
 
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-            KeyCode::Char('r') => app.refresh(),
-            KeyCode::Down | KeyCode::Char('j') => {
-                if !app.installed.is_empty() {
-                    app.selected = (app.selected + 1).min(app.installed.len() - 1);
-                }
+        // Short polling keeps the UI responsive while background install and
+        // launch tasks stream events.
+        if event::poll(Duration::from_millis(100))? {
+            match event::read()? {
+                Event::Key(key) if key.kind != KeyEventKind::Release => app.handle_key(key),
+                Event::Mouse(mouse) => app.handle_mouse(mouse.kind, mouse.column, mouse.row),
+                Event::Resize(_, _) => {}
+                _ => {}
             }
-            KeyCode::Up | KeyCode::Char('k') => {
-                app.selected = app.selected.saturating_sub(1);
-            }
-            KeyCode::Home => app.selected = 0,
-            KeyCode::End => app.selected = app.installed.len().saturating_sub(1),
-            _ => {}
+        }
+        if app.quit {
+            break;
         }
     }
+    Ok(())
 }
 
-fn parse_root() -> Option<PathBuf> {
+fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    let backend = CrosstermBackend::new(stdout);
+    Ok(Terminal::new(backend)?)
+}
+
+fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    terminal.show_cursor()?;
+    Ok(())
+}
+
+/// Make sure a panic does not leave the user's terminal in raw/alternate mode.
+fn install_panic_hook() {
+    let default_hook = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
+        default_hook(info);
+    }));
+}
+
+fn parse_root() -> Result<Option<PathBuf>> {
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         if arg == "--root" {
-            return args.next().map(PathBuf::from);
+            return match args.next() {
+                Some(value) => Ok(Some(PathBuf::from(value))),
+                None => anyhow::bail!("--root requires a directory argument"),
+            };
+        }
+        if let Some(value) = arg.to_str().and_then(|arg| arg.strip_prefix("--root=")) {
+            return Ok(Some(PathBuf::from(value)));
+        }
+        if arg == "--help" || arg == "-h" {
+            println!(
+                "SHCCL - Smart Home Control Craft Launcher (TUI)\n\n\
+                 Usage: shccl-tui [--root DIR]\n\n\
+                 --root DIR   Launcher root (defaults to SHCCL_ROOT or the platform data directory)\n\n\
+                 Keys: 1-5 switch pages, r refresh, ? help, q/Esc quit."
+            );
+            std::process::exit(0);
+        }
+        if arg == "--version" || arg == "-V" {
+            println!("shccl-tui {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
         }
     }
-    None
+    Ok(None)
 }

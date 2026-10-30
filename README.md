@@ -2,7 +2,7 @@
 
 **Smart Home Control Craft Launcher** — 一个用 Rust 编写的 Minecraft 启动器。
 
-SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前阶段以 **CLI 优先**，账号系统先支持 **离线模式**，Microsoft 登录、模组加载器与完整的 TUI 功能作为后续扩展点。
+SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前阶段以 **CLI 优先**，账号系统先支持 **离线模式**，Microsoft 登录与模组加载器作为后续扩展点。CLI、TUI 与 GUI 共享同一份配置和账号数据。
 
 ## 当前状态
 
@@ -10,7 +10,7 @@ SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前
 | --- | --- | --- |
 | `shccl-core` | 可用 | 版本清单、版本 JSON、客户端/库/资源下载、natives 解压、离线账号、Java 检测、启动命令构建与进程启动 |
 | `shccl-cli` | 可用 | 安装、离线登录、账号选择、启动、配置、诊断 |
-| `shccl-tui` | 骨架 | 基于 ratatui/crossterm 的状态面板，可浏览已安装版本与当前账号 |
+| `shccl-tui` | 可用 | 基于 ratatui/crossterm 的完整终端界面：仪表盘、版本安装/启动、离线账号、设置、日志与进度 |
 | `shccl-gui` | 可用 | 基于 SDL3 的完整界面：仪表盘、版本安装/启动、离线账号、设置、日志与进度 |
 
 > 离线账号仅用于离线游戏与离线服务器。Microsoft 登录尚未实现。
@@ -178,7 +178,26 @@ cargo run -p shccl-tui
 cargo run -p shccl-tui -- --root /path/to/.minecraft
 ```
 
-当前提供只读状态面板：`j/k` 或方向键移动，`r` 刷新，`q`/`Esc` 退出。安装、登录和启动暂时通过 CLI 完成。
+TUI 与 CLI/GUI 功能同步，所有操作都会写入同一份 `shccl.json` 和 `accounts.json`：
+
+| 页面 | 对应 CLI | 功能 |
+| --- | --- | --- |
+| Dashboard | `doctor` | Root、配置文件、Java 检测、账号、已安装版本、内存与默认版本 |
+| Versions | `versions` / `install` / `launch` | 浏览已安装版本、加载远端清单、过滤、安装、修复/校验、启动、预览启动命令、设为默认 |
+| Accounts | `login offline` / `accounts` / `select` | 添加并选中离线账号、切换当前账号 |
+| Settings | `config ...` | Java 路径、内存、下载并发、默认版本、游戏目录，以及查看配置 JSON |
+| Logs | - | 安装进度、启动命令、游戏 stdout/stderr |
+
+操作方式：
+
+- `1`–`5` 切换页面，`Tab` / `Shift+Tab` 循环切换；`↑`/`↓` 或 `j`/`k` 移动选择，`PgUp`/`PgDn` 翻页，`Home`/`End` 跳到首尾。
+- `Enter` 执行当前页面的主要操作（启动/安装/选择账号/编辑设置）；Versions 页面中 `←`/`→` 切换 Installed/Remote，`i` 安装指定版本、`l` 加载远端清单、`f` 过滤、`d` 设为默认、`p` 预览启动命令、`v` 校验并修复。
+- Accounts 页面 `a` 添加离线账号；Settings 页面 `Enter` 编辑、`c` 清除可清除项、`s` 以 JSON 输出配置到 Logs；Logs 页面 `c` 清空日志。
+- `r` 刷新本地状态并重新检测 Java；`?` / `F1` 打开快捷键帮助；`q`/`Esc` 退出（弹窗打开时 `Esc` 关闭弹窗）。
+- 输入框支持 `Ctrl+A` 全选，`←`/`→`、`Home`/`End` 移动光标，`Enter` 保存，`Esc` 取消。
+- 鼠标滚轮可滚动列表与日志，点击页签、版本页签和列表行可切换页面或选择条目。
+
+启动游戏时使用 `capture_output`，游戏日志会实时显示在 Logs 页面；启动未安装的版本时会像 CLI 一样先自动安装。安装与启动期间状态栏显示阶段和文件进度。
 
 ## GUI（SDL3）
 
@@ -222,14 +241,13 @@ sdl3 = { version = "0.20", features = ["main", "ttf", "build-from-source-static"
 
 - 当前只保存离线账号，不涉及 Microsoft token。
 - 所有启动参数中的访问令牌在离线模式下为占位值 `0`。
-- 启动的游戏继承 CLI 的 stdin/stdout/stderr；TUI/GUI 后续可使用 `capture_output` 将日志转发到界面。
+- 启动的游戏在 CLI 中继承终端的 stdin/stdout/stderr；TUI/GUI 使用 `capture_output` 将日志转发到界面，不读写游戏 stdin。
 
 ## 后续计划
 
 - Microsoft 设备码登录与 token 刷新
 - Fabric / Forge / NeoForge 等加载器安装
 - Java runtime 自动下载与版本选择
-- 完整 TUI：安装、账号、日志、启动
 - 多实例隔离与实例级配置
 
 ## License
