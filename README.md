@@ -33,7 +33,7 @@ SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前
 
 - Rust 1.88+（edition 2024，使用 `if let` 链等 1.88 稳定特性）
 - Java 21+（新版 Minecraft 所需；旧版本可用 Java 8/17，启动器会读取版本 JSON 的 `javaVersion.majorVersion` 做最低版本检查）
-- SDL3（仅构建/运行 GUI 需要；也可以通过 Cargo feature 从源码构建）
+- SDL3 与 SDL3_ttf（仅构建/运行 GUI 需要；也可以通过 Cargo feature 从源码构建）
 
 默认目录：
 
@@ -208,15 +208,15 @@ GUI 与 CLI 功能同步，所有操作都会写入同一份 `shccl.json` 和 `a
 
 启动游戏时使用 `capture_output`，游戏日志会实时显示在 Logs 页面；启动未安装的版本时会像 CLI 一样先自动安装。
 
-> 当前界面使用 SDL 内置的 8×8 debug 字体（占位，非系统字体）。接入系统等宽 TTF 字体渲染已列入下一版本计划。
+界面文字使用系统已安装的等宽字体渲染：启动时优先通过 fontconfig（`fc-match monospace`）获取当前桌面偏好的等宽字体，否则在系统字体目录中挑选等宽字体文件，并按 12px 行高缩放以适配布局。字体按设备像素光栅化后 1:1 绘制（不使用 SDL 的 renderer scale），因此在高分屏或 2 倍缩放下不会因放大而模糊。若系统中找不到任何等宽字体，GUI 会在启动时报错退出。
 
 如果系统没有 SDL3，可启用从源码构建：
 
 ```toml
-sdl3 = { version = "0.20", features = ["main", "build-from-source-static"] }
+sdl3 = { version = "0.20", features = ["main", "ttf", "build-from-source-static"] }
 ```
 
-初次构建会更慢，并需要相应的 C 工具链。
+初次构建会更慢，并需要相应的 C 工具链（SDL3 与 SDL3_ttf 都会从源码构建）。
 
 ## 安全与隐私
 
@@ -230,7 +230,6 @@ sdl3 = { version = "0.20", features = ["main", "build-from-source-static"] }
 - Fabric / Forge / NeoForge 等加载器安装
 - Java runtime 自动下载与版本选择
 - 完整 TUI：安装、账号、日志、启动
-- GUI 接入系统等宽 TTF 字体，替换 SDL 内置 debug 字体
 - 多实例隔离与实例级配置
 
 ## License

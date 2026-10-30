@@ -337,8 +337,10 @@ impl App {
     pub(crate) fn draw(
         &mut self,
         canvas: &mut sdl3::render::Canvas<sdl3::video::Window>,
+        font: &crate::font::UiFont,
+        text_engine: &sdl3::ttf::TextEngine,
     ) -> anyhow::Result<()> {
-        crate::ui::draw(self, canvas)
+        crate::ui::draw(self, canvas, font, text_engine)
     }
 
     // ------------------------------------------------------------------

@@ -1,4 +1,5 @@
 mod app;
+mod font;
 mod ui;
 
 use std::path::PathBuf;
@@ -6,9 +7,11 @@ use std::time::Duration;
 
 use sdl3::event::Event;
 use sdl3::mouse::MouseButton;
+use sdl3::ttf;
 use shccl_core::Launcher;
 
 use crate::app::App;
+use crate::font::UiFont;
 
 fn main() -> anyhow::Result<()> {
     let root = parse_root();
@@ -32,10 +35,18 @@ fn main() -> anyhow::Result<()> {
         .build()?;
     let mut canvas = window.into_canvas();
     let (output_width, output_height) = canvas.output_size()?;
-    canvas.set_scale(
-        output_width as f32 / ui::LOGICAL_WIDTH,
-        output_height as f32 / ui::LOGICAL_HEIGHT,
-    )?;
+    // The UI is laid out in a 640x400 space and drawn straight into device
+    // pixels: shapes and text are scaled here instead of using a renderer scale,
+    // which would rasterize glyphs at the small size and then blur them by
+    // upscaling.
+    let scale =
+        (output_width as f32 / ui::LOGICAL_WIDTH).min(output_height as f32 / ui::LOGICAL_HEIGHT);
+
+    // Text is rendered with a monospace font that is picked from the ones the
+    // system has installed, so the UI matches the rest of the desktop.
+    let ttf = ttf::init()?;
+    let font = UiFont::load_system(&ttf, scale)?;
+    let text_engine = ttf::TextEngine::new(&canvas.texture_creator())?;
 
     // Text input is always enabled; the application only consumes it while an
     // input dialog is open.
@@ -74,7 +85,7 @@ fn main() -> anyhow::Result<()> {
         }
 
         app.poll_backend();
-        app.draw(&mut canvas)?;
+        app.draw(&mut canvas, &font, &text_engine)?;
         std::thread::sleep(Duration::from_millis(16));
     }
 

@@ -1,11 +1,13 @@
 use anyhow::Result;
 use sdl3::pixels::Color;
-use sdl3::render::{Canvas, FPoint, FRect};
+use sdl3::render::{Canvas, FRect};
+use sdl3::ttf::{Font, TextEngine};
 use sdl3::video::Window;
 
 use crate::app::{
     Action, App, Busy, Hit, InputModal, Level, Page, ScrollTarget, Setting, VersionTab,
 };
+use crate::font::UiFont;
 
 pub(crate) const WINDOW_WIDTH: u32 = 1280;
 pub(crate) const WINDOW_HEIGHT: u32 = 800;
@@ -18,7 +20,6 @@ pub(crate) const VERSION_ROWS: usize = 14;
 pub(crate) const ACCOUNT_ROWS: usize = 9;
 pub(crate) const LOG_ROWS: usize = 19;
 
-const FONT_WIDTH: f32 = 8.0;
 const LINE_HEIGHT: f32 = 14.0;
 
 const BACKGROUND: Color = Color::RGB(12, 15, 20);
@@ -59,6 +60,11 @@ fn footer_rect() -> FRect {
 
 struct Painter<'a> {
     canvas: &'a mut Canvas<Window>,
+    text_engine: &'a TextEngine,
+    font: &'a Font<'static>,
+    scale: f32,
+    char_width: f32,
+    line_height: f32,
     hits: &'a mut Vec<Hit>,
     scroll_hits: &'a mut Vec<(FRect, ScrollTarget)>,
     mouse: (f32, f32),
@@ -66,23 +72,40 @@ struct Painter<'a> {
 }
 
 impl Painter<'_> {
+    /// Converts a rect from the 640x400 layout space into device pixels,
+    /// snapping the edges so neighbouring rectangles do not leave seams.
+    fn device(&self, rect: FRect) -> FRect {
+        let left = (rect.x * self.scale).round();
+        let top = (rect.y * self.scale).round();
+        let right = ((rect.x + rect.w) * self.scale).round();
+        let bottom = ((rect.y + rect.h) * self.scale).round();
+        FRect::new(left, top, right - left, bottom - top)
+    }
+
     fn fill(&mut self, rect: FRect, color: Color) -> Result<()> {
         self.canvas.set_draw_color(color);
-        self.canvas.fill_rect(rect)?;
+        self.canvas.fill_rect(self.device(rect))?;
         Ok(())
     }
 
     fn outline(&mut self, rect: FRect, color: Color) -> Result<()> {
         self.canvas.set_draw_color(color);
-        self.canvas.draw_rect(rect)?;
+        self.canvas.draw_rect(self.device(rect))?;
         Ok(())
     }
 
     fn text(&mut self, text: &str, x: f32, y: f32, color: Color) -> Result<()> {
-        self.canvas.set_draw_color(color);
-        self.canvas
-            .draw_debug_text(&sanitize(text), FPoint::new(x, y))?;
+        let mut rendered = self.text_engine.create_text(self.font, &sanitize(text))?;
+        rendered.set_color(color)?;
+        // The glyphs were rasterized at the device resolution, so place them on
+        // whole device pixels to keep them sharp.
+        rendered.draw((x * self.scale).round(), (y * self.scale).round())?;
         Ok(())
+    }
+
+    /// Vertical position that centers one line of text inside `rect`.
+    fn line_y(&self, rect: FRect) -> f32 {
+        rect.y + (rect.h - self.line_height) / 2.0
     }
 
     fn text_clipped(
@@ -105,13 +128,13 @@ impl Painter<'_> {
         self.fill(rect, if hover { PANEL_HOVER } else { PANEL_LIGHT })?;
         self.outline(rect, if hover { ACCENT } else { BORDER })?;
 
-        let max_chars = ((rect.w - 8.0) / FONT_WIDTH).max(1.0) as usize;
+        let max_chars = ((rect.w - 8.0) / self.char_width).max(1.0) as usize;
         let label = clip(label, max_chars);
-        let width = label.chars().count() as f32 * FONT_WIDTH;
+        let width = label.chars().count() as f32 * self.char_width;
         self.text(
             &label,
             rect.x + (rect.w - width) / 2.0,
-            rect.y + (rect.h - 8.0) / 2.0,
+            self.line_y(rect),
             if hover { TEXT } else { MUTED },
         )?;
 
@@ -124,13 +147,13 @@ impl Painter<'_> {
     fn tab(&mut self, rect: FRect, label: &str, selected: bool, action: Action) -> Result<()> {
         self.fill(rect, if selected { ACCENT_DIM } else { PANEL_LIGHT })?;
         self.outline(rect, if selected { ACCENT } else { BORDER })?;
-        let max_chars = ((rect.w - 8.0) / FONT_WIDTH).max(1.0) as usize;
+        let max_chars = ((rect.w - 8.0) / self.char_width).max(1.0) as usize;
         let label = clip(label, max_chars);
-        let width = label.chars().count() as f32 * FONT_WIDTH;
+        let width = label.chars().count() as f32 * self.char_width;
         self.text(
             &label,
             rect.x + (rect.w - width) / 2.0,
-            rect.y + (rect.h - 8.0) / 2.0,
+            self.line_y(rect),
             if selected { TEXT } else { MUTED },
         )?;
         if self.interactive {
@@ -182,7 +205,7 @@ impl Painter<'_> {
 
     fn page_heading(&mut self, main: FRect, title: &str, subtitle: &str) -> Result<()> {
         self.text(title, main.x + 12.0, main.y + 10.0, ACCENT)?;
-        let x = main.x + 12.0 + (title.chars().count() as f32 + 1.5) * FONT_WIDTH;
+        let x = main.x + 12.0 + (title.chars().count() as f32 + 1.5) * self.char_width;
         self.text(subtitle, x, main.y + 10.0, MUTED)
     }
 
@@ -193,7 +216,7 @@ impl Painter<'_> {
         self.text("SHCCL", rect.x + 16.0, rect.y + 8.0, ACCENT)?;
         self.text(
             env!("CARGO_PKG_VERSION"),
-            rect.x + 16.0 + 6.0 * FONT_WIDTH,
+            rect.x + 16.0 + 6.0 * self.char_width,
             rect.y + 8.0,
             MUTED,
         )?;
@@ -205,7 +228,7 @@ impl Painter<'_> {
         )?;
 
         let title = app.page.title();
-        let title_width = title.chars().count() as f32 * FONT_WIDTH;
+        let title_width = title.chars().count() as f32 * self.char_width;
         self.text(
             title,
             rect.x + rect.w - 12.0 - title_width,
@@ -221,7 +244,7 @@ impl Painter<'_> {
             ("idle".to_string(), MUTED)
         };
         let state = clip(&state, 30);
-        let state_width = state.chars().count() as f32 * FONT_WIDTH;
+        let state_width = state.chars().count() as f32 * self.char_width;
         self.text(
             &state,
             rect.x + rect.w - 12.0 - state_width,
@@ -248,7 +271,7 @@ impl Painter<'_> {
             self.text(
                 &format!("{}  {}", page.hotkey(), page.title()),
                 item.x + 8.0,
-                item.y + 7.0,
+                item.y + (item.h - self.line_height) / 2.0,
                 if selected { TEXT } else { MUTED },
             )?;
             if self.interactive {
@@ -301,7 +324,7 @@ impl Painter<'_> {
 
         let label_x = main.x + 12.0;
         let value_x = label_x + 96.0;
-        let max_chars = (((main.x + main.w - 14.0) - value_x) / FONT_WIDTH) as usize;
+        let max_chars = (((main.x + main.w - 14.0) - value_x) / self.char_width) as usize;
         let mut y = main.y + 30.0;
 
         let paths = app.launcher.paths();
@@ -608,8 +631,8 @@ impl Painter<'_> {
             self.text_clipped(
                 &line,
                 row.x + 6.0,
-                row.y + 3.0,
-                ((row.w - 24.0) / FONT_WIDTH) as usize,
+                self.line_y(row),
+                ((row.w - 24.0) / self.char_width) as usize,
                 if selected { TEXT } else { MUTED },
             )?;
         }
@@ -664,8 +687,8 @@ impl Painter<'_> {
             self.text_clipped(
                 &line,
                 row.x + 6.0,
-                row.y + 3.0,
-                ((row.w - 24.0) / FONT_WIDTH) as usize,
+                self.line_y(row),
+                ((row.w - 24.0) / self.char_width) as usize,
                 if selected { TEXT } else { MUTED },
             )?;
         }
@@ -701,6 +724,7 @@ impl Painter<'_> {
                 let row = FRect::new(list.x, list.y + (index - start) as f32 * 26.0, list.w, 26.0);
                 let selected = index == app.account_sel;
                 self.list_row(row, selected, Action::SelectAccount(index))?;
+                let text_y = row.y + (row.h - 2.0 * self.line_height) / 2.0;
 
                 let marker = if app.accounts.selected.as_deref() == Some(account.uuid.as_str()) {
                     "*"
@@ -710,15 +734,15 @@ impl Painter<'_> {
                 self.text_clipped(
                     &format!("{marker} {:<16} {}", account.username, account.kind),
                     row.x + 8.0,
-                    row.y + 4.0,
-                    ((row.w - 24.0) / FONT_WIDTH) as usize,
+                    text_y,
+                    ((row.w - 24.0) / self.char_width) as usize,
                     if selected { TEXT } else { MUTED },
                 )?;
                 self.text_clipped(
                     &account.uuid,
                     row.x + 16.0,
-                    row.y + 15.0,
-                    ((row.w - 32.0) / FONT_WIDTH) as usize,
+                    text_y + self.line_height,
+                    ((row.w - 32.0) / self.char_width) as usize,
                     MUTED,
                 )?;
             }
@@ -835,7 +859,7 @@ impl Painter<'_> {
             value,
             rect.x + 10.0,
             rect.y + 21.0,
-            ((rect.w - 140.0) / FONT_WIDTH) as usize,
+            ((rect.w - 140.0) / self.char_width) as usize,
             TEXT,
         )?;
 
@@ -870,7 +894,7 @@ impl Painter<'_> {
             main.x + 12.0,
             main.y + 34.0,
             main.w - 24.0,
-            LOG_ROWS as f32 * 12.0,
+            LOG_ROWS as f32 * self.line_height + 4.0,
         );
         self.fill(area, LIST_BACKGROUND)?;
 
@@ -894,7 +918,12 @@ impl Painter<'_> {
                 } else {
                     TEXT
                 };
-                self.text(text, area.x + 6.0, area.y + 4.0 + line as f32 * 12.0, color)?;
+                self.text(
+                    text,
+                    area.x + 6.0,
+                    area.y + 4.0 + line as f32 * self.line_height,
+                    color,
+                )?;
             }
             self.scrollbar(area, offset, total, LOG_ROWS)?;
         }
@@ -915,7 +944,7 @@ impl Painter<'_> {
             &app.status.text,
             rect.x + 8.0,
             rect.y + 4.0,
-            ((rect.w - 16.0) / FONT_WIDTH) as usize,
+            ((rect.w - 16.0) / self.char_width) as usize,
             color,
         )?;
 
@@ -924,7 +953,7 @@ impl Painter<'_> {
         } else {
             "1-5 pages   Enter   R refresh   Q quit"
         };
-        let hints_width = hints.chars().count() as f32 * FONT_WIDTH;
+        let hints_width = hints.chars().count() as f32 * self.char_width;
         self.text(
             hints,
             rect.x + rect.w - 8.0 - hints_width,
@@ -939,7 +968,7 @@ impl Painter<'_> {
                 page_hint(app.page),
                 rect.x + 8.0,
                 rect.y + 16.0,
-                ((rect.w - 24.0 - hints_width) / FONT_WIDTH) as usize,
+                ((rect.w - 24.0 - hints_width) / self.char_width) as usize,
                 MUTED,
             )?;
         }
@@ -947,7 +976,7 @@ impl Painter<'_> {
     }
 
     fn busy_line(&mut self, app: &App, rect: FRect, busy: &Busy, hints_width: f32) -> Result<()> {
-        let max_chars = ((rect.w - 24.0 - hints_width) / FONT_WIDTH).max(8.0) as usize;
+        let max_chars = ((rect.w - 24.0 - hints_width) / self.char_width).max(8.0) as usize;
         let line = if busy.total > 0 {
             format!(
                 "{} | {} {}/{} {}",
@@ -997,7 +1026,7 @@ impl Painter<'_> {
             modal.prompt,
             rect.x + 14.0,
             rect.y + 30.0,
-            ((rect.w - 28.0) / FONT_WIDTH) as usize,
+            ((rect.w - 28.0) / self.char_width) as usize,
             MUTED,
         )?;
 
@@ -1005,7 +1034,7 @@ impl Painter<'_> {
         self.fill(input, BACKGROUND)?;
         self.outline(input, BORDER)?;
 
-        let max_chars = ((input.w - 10.0) / FONT_WIDTH).max(1.0) as usize;
+        let max_chars = ((input.w - 10.0) / self.char_width).max(1.0) as usize;
         let chars: Vec<char> = modal.value.chars().collect();
         let cursor = modal.cursor.min(chars.len());
         let start = cursor.saturating_sub(max_chars.saturating_sub(1));
@@ -1014,15 +1043,21 @@ impl Painter<'_> {
             let visible_start = selection_start.max(start);
             let visible_end = selection_end.min(end);
             if visible_start < visible_end {
-                let x = input.x + 4.0 + (visible_start - start) as f32 * FONT_WIDTH;
-                let width = (visible_end - visible_start) as f32 * FONT_WIDTH;
-                self.fill(FRect::new(x, input.y + 4.0, width, 12.0), ACCENT_DIM)?;
+                let x = input.x + 4.0 + (visible_start - start) as f32 * self.char_width;
+                let width = (visible_end - visible_start) as f32 * self.char_width;
+                self.fill(
+                    FRect::new(x, self.line_y(input), width, self.line_height),
+                    ACCENT_DIM,
+                )?;
             }
         }
         let shown: String = chars[start..end].iter().collect();
-        self.text(&shown, input.x + 4.0, input.y + 6.0, TEXT)?;
-        let cursor_x = input.x + 4.0 + (cursor - start) as f32 * FONT_WIDTH;
-        self.fill(FRect::new(cursor_x, input.y + 4.0, 1.0, 12.0), ACCENT)?;
+        self.text(&shown, input.x + 4.0, self.line_y(input), TEXT)?;
+        let cursor_x = input.x + 4.0 + (cursor - start) as f32 * self.char_width;
+        self.fill(
+            FRect::new(cursor_x, self.line_y(input), 1.0, self.line_height),
+            ACCENT,
+        )?;
 
         self.text(
             "Enter: save   Esc: cancel",
@@ -1053,7 +1088,12 @@ impl Painter<'_> {
     }
 }
 
-pub(crate) fn draw(app: &mut App, canvas: &mut Canvas<Window>) -> Result<()> {
+pub(crate) fn draw(
+    app: &mut App,
+    canvas: &mut Canvas<Window>,
+    font: &UiFont,
+    text_engine: &TextEngine,
+) -> Result<()> {
     canvas.set_draw_color(BACKGROUND);
     canvas.clear();
 
@@ -1062,6 +1102,11 @@ pub(crate) fn draw(app: &mut App, canvas: &mut Canvas<Window>) -> Result<()> {
     {
         let mut painter = Painter {
             canvas,
+            text_engine,
+            font: font.font(),
+            scale: font.scale(),
+            char_width: font.char_width(),
+            line_height: font.line_height(),
             hits: &mut hits,
             scroll_hits: &mut scroll_hits,
             mouse: app.mouse,
