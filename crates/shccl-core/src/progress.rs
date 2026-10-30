@@ -11,6 +11,7 @@ pub enum Phase {
     Assets,
     Natives,
     Launch,
+    Auth,
 }
 
 impl fmt::Display for Phase {
@@ -21,6 +22,7 @@ impl fmt::Display for Phase {
             Self::Assets => "assets",
             Self::Natives => "natives",
             Self::Launch => "launch",
+            Self::Auth => "auth",
         };
         f.write_str(name)
     }

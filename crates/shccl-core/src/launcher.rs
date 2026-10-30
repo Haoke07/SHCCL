@@ -8,6 +8,7 @@ use crate::download::{DownloadTask, Downloader, build_http_client};
 use crate::error::{Error, Result};
 use crate::java::detect_java;
 use crate::launch::{self, LaunchHandle, LaunchPlan, LaunchRequest};
+use crate::microsoft::{self, DeviceCode, MicrosoftAuth};
 use crate::paths::{LauncherPaths, validate_version_id};
 use crate::progress::{Phase, ProgressEvent, ProgressSink};
 use crate::util::{read_json, read_lock, write_json, write_lock};
@@ -20,6 +21,7 @@ const RESOURCES_BASE_URL: &str = "https://resources.download.minecraft.net";
 struct Inner {
     paths: LauncherPaths,
     downloader: Downloader,
+    microsoft: MicrosoftAuth,
     config: RwLock<LauncherConfig>,
     accounts: RwLock<AccountStore>,
 }
@@ -38,12 +40,14 @@ impl Launcher {
         let config = LauncherConfig::load(&paths.config_file())?;
         let accounts = AccountStore::load(&paths.accounts_file())?;
         let http = build_http_client()?;
+        let microsoft = MicrosoftAuth::with_client(http.clone());
         let downloader = Downloader::new(http, config.download_concurrency());
 
         Ok(Self {
             inner: Arc::new(Inner {
                 paths,
                 downloader,
+                microsoft,
                 config: RwLock::new(config),
                 accounts: RwLock::new(accounts),
             }),
@@ -92,6 +96,128 @@ impl Launcher {
 
     pub fn current_account(&self) -> Option<Account> {
         read_lock(&self.inner.accounts).current().cloned()
+    }
+
+    /// Start a Microsoft device-code login.
+    ///
+    /// The caller is responsible for showing [`DeviceCode::verification_uri`]
+    /// and [`DeviceCode::user_code`] to the user, then passing the code to
+    /// [`Launcher::microsoft_login`].
+    pub async fn microsoft_device_code(&self) -> Result<DeviceCode> {
+        let client_id = self
+            .microsoft_client_id()
+            .ok_or_else(microsoft::missing_client_id)?;
+        self.inner.microsoft.request_device_code(&client_id).await
+    }
+
+    /// Azure application client id, baked in at build time or overridden by
+    /// `SHCCL_MICROSOFT_CLIENT_ID` at runtime.
+    pub fn microsoft_client_id(&self) -> Option<String> {
+        microsoft::configured_client_id()
+    }
+
+    /// Wait for a device-code login to finish, then store and select the
+    /// resulting Microsoft account.
+    pub async fn microsoft_login(&self, code: &DeviceCode, sink: &ProgressSink) -> Result<Account> {
+        let client_id = self
+            .microsoft_client_id()
+            .ok_or_else(microsoft::missing_client_id)?;
+        let tokens = self
+            .inner
+            .microsoft
+            .wait_for_login(&client_id, code, sink)
+            .await?;
+        let session = self.inner.microsoft.sign_in(&tokens.access_token).await?;
+        let account = Account::from_session(&session, tokens.refresh_token, client_id, false)?;
+        self.upsert_account(account.clone())?;
+        Ok(account)
+    }
+
+    /// Browser URL for the legacy Live Connect authorization flow.
+    ///
+    /// This flow uses the official launcher's shared client id and is only
+    /// intended as a fallback until a proper Azure application is registered.
+    pub fn microsoft_legacy_url(&self) -> String {
+        microsoft::legacy_authorization_url()
+    }
+
+    /// Complete a legacy login from a pasted redirect URL (or raw code).
+    pub async fn microsoft_legacy_login(
+        &self,
+        redirect: &str,
+        sink: &ProgressSink,
+    ) -> Result<Account> {
+        let code = microsoft::parse_legacy_redirect(redirect)?;
+        sink(ProgressEvent::Step {
+            phase: Phase::Auth,
+            message: "exchanging the legacy Microsoft authorization code".to_string(),
+        });
+        let tokens = self.inner.microsoft.legacy_exchange_code(&code).await?;
+        let session = self.inner.microsoft.sign_in(&tokens.access_token).await?;
+        let account = Account::from_session(
+            &session,
+            tokens.refresh_token,
+            microsoft::LEGACY_CLIENT_ID.to_string(),
+            true,
+        )?;
+        self.upsert_account(account.clone())?;
+        Ok(account)
+    }
+
+    /// Renew a Microsoft account when its access token is about to expire.
+    ///
+    /// Offline accounts and fresh sessions are returned unchanged. Refreshed
+    /// credentials are written back to `accounts.json` without changing the
+    /// currently selected account.
+    pub async fn refresh_account(&self, account: &Account) -> Result<Account> {
+        if !account.needs_refresh() {
+            return Ok(account.clone());
+        }
+        let refresh_token = account.refresh_token.clone().ok_or_else(|| {
+            Error::Auth(
+                "this Microsoft account has no refresh token; sign in again with `shccl login microsoft`"
+                    .into(),
+            )
+        })?;
+        // Refresh tokens are bound to the client that issued them. Legacy
+        // accounts use the Live Connect endpoint instead of Entra.
+        let client_id = if account.legacy {
+            account
+                .client_id
+                .clone()
+                .unwrap_or_else(|| microsoft::LEGACY_CLIENT_ID.to_string())
+        } else {
+            account
+                .client_id
+                .clone()
+                .or_else(|| self.microsoft_client_id())
+                .ok_or_else(microsoft::missing_client_id)?
+        };
+        let tokens = if account.legacy {
+            self.inner.microsoft.legacy_refresh(&refresh_token).await?
+        } else {
+            self.inner
+                .microsoft
+                .refresh(&client_id, &refresh_token)
+                .await?
+        };
+        let session = self.inner.microsoft.sign_in(&tokens.access_token).await?;
+        let refreshed = Account::from_session(
+            &session,
+            tokens.refresh_token.or(Some(refresh_token)),
+            client_id,
+            account.legacy,
+        )?;
+        self.store_account(refreshed.clone())?;
+        Ok(refreshed)
+    }
+
+    /// Add or replace an account without touching the current selection.
+    pub fn store_account(&self, account: Account) -> Result<()> {
+        let path = self.inner.paths.accounts_file();
+        let mut accounts = write_lock(&self.inner.accounts);
+        accounts.upsert(account);
+        accounts.save(&path)
     }
 
     pub async fn fetch_manifest(&self) -> Result<VersionManifest> {
@@ -311,6 +437,10 @@ impl Launcher {
         if !self.is_installed(&request.version_id) {
             return Err(Error::VersionNotInstalled(request.version_id.clone()));
         }
+        // Microsoft tokens are short lived; renew them before building the
+        // command line so the game receives a valid session.
+        let mut request = request;
+        request.account = self.refresh_account(&request.account).await?;
         let details = self.load_installed_details(&request.version_id, &mut HashSet::new())?;
         let config = self.config();
         let java_path = request

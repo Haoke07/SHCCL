@@ -4,7 +4,10 @@ use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
-use crate::util::{read_json, write_json_private};
+use crate::util::{read_json, unix_now, write_json_private};
+
+/// Refresh a Microsoft session when it expires within this many seconds.
+const MICROSOFT_REFRESH_MARGIN_SECS: u64 = 300;
 
 /// The authentication mechanism backing an account.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,17 +15,24 @@ use crate::util::{read_json, write_json_private};
 pub enum AccountKind {
     #[default]
     Offline,
+    Microsoft,
 }
 
 impl std::fmt::Display for AccountKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Offline => f.write_str("offline"),
+            Self::Microsoft => f.write_str("microsoft"),
         }
     }
 }
 
-/// An offline-mode player profile.
+/// A player profile known to this launcher.
+///
+/// Offline profiles only carry `username` and `uuid`. Microsoft profiles add
+/// the access token used for online play together with the refresh token and
+/// metadata needed to renew it, all of which are persisted to
+/// `accounts.json` with private permissions on Unix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Account {
     pub username: String,
@@ -30,6 +40,29 @@ pub struct Account {
     pub uuid: String,
     #[serde(default)]
     pub kind: AccountKind,
+    /// Minecraft services access token. `None` for offline accounts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_token: Option<String>,
+    /// Microsoft OAuth refresh token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_token: Option<String>,
+    /// Unix timestamp (seconds) at which `access_token` expires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<u64>,
+    /// Xbox user id reported by XSTS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xuid: Option<String>,
+    /// Azure application (client) id that issued the refresh token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// Whether this account was created with the legacy Live Connect flow and
+    /// therefore must be refreshed against `login.live.com`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub legacy: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 impl Account {
@@ -63,18 +96,58 @@ impl Account {
             username: username.to_string(),
             uuid,
             kind: AccountKind::Offline,
+            access_token: None,
+            refresh_token: None,
+            expires_at: None,
+            xuid: None,
+            client_id: None,
+            legacy: false,
         })
     }
 
     pub fn user_type(&self) -> &'static str {
         match self.kind {
             AccountKind::Offline => "legacy",
+            AccountKind::Microsoft => "msa",
         }
     }
 
-    pub fn access_token(&self) -> &'static str {
+    pub fn access_token(&self) -> &str {
         match self.kind {
             AccountKind::Offline => "0",
+            AccountKind::Microsoft => self.access_token.as_deref().unwrap_or(""),
+        }
+    }
+
+    /// Value for the legacy `${auth_session}` placeholder.
+    pub fn auth_session(&self) -> String {
+        match self.kind {
+            AccountKind::Offline => self.access_token().to_string(),
+            AccountKind::Microsoft => {
+                format!(
+                    "token:{}:{}",
+                    self.access_token(),
+                    self.uuid.replace('-', "")
+                )
+            }
+        }
+    }
+
+    pub fn xuid(&self) -> &str {
+        self.xuid.as_deref().unwrap_or("")
+    }
+
+    /// Whether this account needs to renew its Microsoft tokens before use.
+    /// Offline accounts never do.
+    pub fn needs_refresh(&self) -> bool {
+        if self.kind != AccountKind::Microsoft {
+            return false;
+        }
+        match self.expires_at {
+            Some(expires_at) => {
+                unix_now().saturating_add(MICROSOFT_REFRESH_MARGIN_SECS) >= expires_at
+            }
+            None => true,
         }
     }
 }

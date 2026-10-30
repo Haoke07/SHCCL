@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -35,7 +36,7 @@ enum Command {
         version: String,
     },
 
-    /// Create and select an offline account.
+    /// Create and select an account.
     Login {
         #[command(subcommand)]
         method: LoginMethod,
@@ -77,6 +78,13 @@ enum LoginMethod {
     Offline {
         /// Player name (letters, digits and underscore, up to 16 characters).
         username: String,
+    },
+    /// Sign in with a Microsoft account.
+    Microsoft {
+        /// Use the legacy Live Connect browser flow with the official
+        /// launcher's shared client id (manual redirect paste, unsupported).
+        #[arg(long)]
+        legacy: bool,
     },
 }
 
@@ -156,7 +164,7 @@ async fn main() -> Result<()> {
         Command::Doctor => doctor(&launcher),
         Command::Versions(args) => versions(&launcher, args).await,
         Command::Install { version } => install(&launcher, &version).await,
-        Command::Login { method } => login(&launcher, method),
+        Command::Login { method } => login(&launcher, method).await,
         Command::Accounts => accounts(&launcher),
         Command::Select { account } => select(&launcher, &account),
         Command::Launch(args) => launch(&launcher, args).await,
@@ -249,7 +257,7 @@ async fn install(launcher: &Launcher, version: &str) -> Result<()> {
     Ok(())
 }
 
-fn login(launcher: &Launcher, method: LoginMethod) -> Result<()> {
+async fn login(launcher: &Launcher, method: LoginMethod) -> Result<()> {
     match method {
         LoginMethod::Offline { username } => {
             let account = Account::offline(&username)?;
@@ -259,14 +267,71 @@ fn login(launcher: &Launcher, method: LoginMethod) -> Result<()> {
                 account.username, account.uuid
             );
         }
+        LoginMethod::Microsoft { legacy } => login_microsoft(launcher, legacy).await?,
     }
+    Ok(())
+}
+
+async fn login_microsoft(launcher: &Launcher, legacy: bool) -> Result<()> {
+    if legacy {
+        return login_microsoft_legacy(launcher).await;
+    }
+
+    if launcher.microsoft_client_id().is_none() {
+        eprintln!("{}", shccl_core::microsoft::CLIENT_ID_HELP);
+        bail!("this build has no Microsoft client ID configured");
+    }
+
+    let code = launcher.microsoft_device_code().await?;
+    println!("Microsoft device code login");
+    println!("  1. Open {}", code.verification_uri);
+    println!("  2. Enter the code {}", code.user_code);
+    if !code.message.is_empty() {
+        println!("  ({})", code.message);
+    }
+    println!("Waiting for Microsoft sign-in... (Ctrl+C to cancel)");
+
+    let account = launcher.microsoft_login(&code, &cli_progress()).await?;
+    println!(
+        "Microsoft account '{}' added and selected (UUID {}).",
+        account.username, account.uuid
+    );
+    Ok(())
+}
+
+async fn login_microsoft_legacy(launcher: &Launcher) -> Result<()> {
+    println!("Legacy Microsoft login (Live Connect, unsupported fallback)");
+    println!("  1. Open this URL in a browser:");
+    println!("     {}", launcher.microsoft_legacy_url());
+    println!("  2. Sign in with your Microsoft account.");
+    println!("  3. After the redirect, copy the full URL from the address bar.");
+    print!("Paste the redirect URL or code: ");
+    std::io::stdout().flush().ok();
+
+    let input = tokio::task::spawn_blocking(|| {
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        Ok::<_, std::io::Error>(line)
+    })
+    .await??;
+    if input.trim().is_empty() {
+        bail!("no redirect URL was provided");
+    }
+
+    let account = launcher
+        .microsoft_legacy_login(input.trim(), &cli_progress())
+        .await?;
+    println!(
+        "Microsoft account '{}' added and selected (UUID {}).",
+        account.username, account.uuid
+    );
     Ok(())
 }
 
 fn accounts(launcher: &Launcher) -> Result<()> {
     let store = launcher.accounts();
     if store.accounts.is_empty() {
-        println!("No accounts. Run `shccl login offline <name>`.");
+        println!("No accounts. Run `shccl login offline <name>` or `shccl login microsoft`.");
         return Ok(());
     }
 
@@ -309,9 +374,13 @@ async fn launch(launcher: &Launcher, args: LaunchArgs) -> Result<()> {
             anyhow::anyhow!("account '{query}' not found; run `shccl accounts` to list accounts")
         })?,
         None => launcher.current_account().ok_or_else(|| {
-            anyhow::anyhow!("no account selected; run `shccl login offline <name>`")
+            anyhow::anyhow!(
+                "no account selected; run `shccl login offline <name>` or `shccl login microsoft`"
+            )
         })?,
     };
+    // Renew expired Microsoft tokens before preparing or starting the game.
+    let account = launcher.refresh_account(&account).await?;
 
     if !launcher.is_installed(&version_id) {
         if args.dry_run {

@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -48,6 +49,14 @@ pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     }
     fs::rename(&tmp, path)?;
     Ok(())
+}
+
+/// Seconds since the Unix epoch, saturating at the platform limits.
+pub(crate) fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 pub(crate) fn sha1_bytes(bytes: &[u8]) -> String {

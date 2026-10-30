@@ -2,18 +2,18 @@
 
 **Smart Home Control Craft Launcher** — 一个用 Rust 编写的 Minecraft 启动器。
 
-SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前阶段以 **CLI 优先**，账号系统先支持 **离线模式**，Microsoft 登录与模组加载器作为后续扩展点。CLI、TUI 与 GUI 共享同一份配置和账号数据。
+SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前阶段以 **CLI 优先**，账号系统支持 **离线模式** 与 **Microsoft 登录**（设备码流程 + token 自动刷新）。CLI、TUI 与 GUI 共享同一份配置和账号数据。
 
 ## 当前状态
 
 | 组件 | 状态 | 说明 |
 | --- | --- | --- |
-| `shccl-core` | 可用 | 版本清单、版本 JSON、客户端/库/资源下载、natives 解压、离线账号、Java 检测、启动命令构建与进程启动 |
-| `shccl-cli` | 可用 | 安装、离线登录、账号选择、启动、配置、诊断 |
+| `shccl-core` | 可用 | 版本清单、版本 JSON、客户端/库/资源下载、natives 解压、离线账号、Microsoft 设备码登录与 token 刷新、Java 检测、启动命令构建与进程启动 |
+| `shccl-cli` | 可用 | 安装、离线 / Microsoft 登录、账号选择、启动、配置、诊断 |
 | `shccl-tui` | 可用 | 基于 ratatui/crossterm 的完整终端界面：仪表盘、版本安装/启动、离线账号、设置、日志与进度 |
 | `shccl-gui` | 可用 | 基于 SDL3 的完整界面：仪表盘、版本安装/启动、离线账号、设置、日志与进度 |
 
-> 离线账号仅用于离线游戏与离线服务器。Microsoft 登录尚未实现。
+> 离线账号仅用于离线游戏与离线服务器；Microsoft 账号可用于正版服务器，启动前会自动刷新过期 token。
 
 ## Workspace 结构
 
@@ -55,6 +55,12 @@ cargo run -p shccl-cli -- doctor
 # 创建并选中离线账号
 cargo run -p shccl-cli -- login offline Steve
 
+# 使用 Microsoft 设备码登录（按提示在浏览器输入代码）
+cargo run -p shccl-cli -- login microsoft
+
+# 临时回退：旧版 Live Connect 公共 ID（无需注册应用，需手动粘贴回调 URL）
+cargo run -p shccl-cli -- login microsoft --legacy
+
 # 查看远端版本
 cargo run -p shccl-cli -- versions --remote --limit 10
 
@@ -79,6 +85,7 @@ shccl doctor
 shccl versions [--remote] [--limit N]
 shccl install <VERSION>
 shccl login offline <NAME>
+shccl login microsoft [--legacy]
 shccl accounts
 shccl select <USERNAME|UUID>
 shccl launch [VERSION] [--account NAME] [--java PATH] [--memory MiB]
@@ -115,7 +122,7 @@ shccl config clear-game-dir
 
 `game_dir` 为空时使用 launcher root 作为游戏目录（与标准 `.minecraft` 一致），已有的 `saves`、`resourcepacks`、`options.txt` 可以直接复用。相对路径会相对于 root 解析。
 
-离线账号保存在 `<root>/accounts.json`。在 Unix 系统上写入时会设置为 `0600` 权限。
+账号保存在 `<root>/accounts.json`。在 Unix 系统上写入时会设置为 `0600` 权限。
 
 离线 UUID 使用与 Java 相同的算法：
 
@@ -124,6 +131,47 @@ UUID.nameUUIDFromBytes(("OfflinePlayer:" + name).getBytes(UTF_8))
 ```
 
 因此与其它启动器、离线服务器和现有世界保持一致。
+
+Microsoft 账号额外保存 Minecraft 访问令牌、OAuth 刷新令牌、过期时间与 XUID。访问令牌在启动前 5 分钟内过期时会自动刷新；刷新失败时会提示重新执行 `shccl login microsoft`。
+
+Microsoft 登录需要启动器自己的 Azure 应用 client ID。它是公共客户端，不需要 secret。发布构建时应把 client ID 编进二进制，最终用户无需任何配置：
+
+```bash
+SHCCL_MICROSOFT_CLIENT_ID=<client-id> cargo build --release -p shccl-cli
+```
+
+开发和测试时也可以在运行时覆盖：
+
+```bash
+SHCCL_MICROSOFT_CLIENT_ID=<client-id> cargo run -p shccl-cli -- login microsoft
+```
+
+注册 Azure 应用时注意：
+
+- 账号类型选择支持个人 Microsoft 账号；
+- 在“Authentication”中启用“Allow public client flows”；
+- 设备码流程不需要重定向 URI，也不需要客户端密码；
+- 新注册的应用还需在 <https://aka.ms/mce-reviewappid> 申请 Minecraft API 访问权限，否则 `api.minecraftservices.com` 会返回 403；
+- scope 为 `XboxLive.signin offline_access`。
+
+登录时使用的 client ID 会随账号一起保存，后续刷新 token 不依赖运行时环境。旧版共享 client ID `00000000402b5328` 不支持设备码流程（`AADSTS700016`），因此不再作为默认值。
+
+### 临时使用旧版 Live Connect（`--legacy`）
+
+在注册自己的 Azure 应用之前，可以用官方启动器的旧版公共 client ID 登录：
+
+```bash
+cargo run -p shccl-cli -- login microsoft --legacy
+```
+
+这条路径：
+
+- 使用 `00000000402b5328` 和旧版 Live Connect 授权码流程；
+- 打开浏览器登录后，需要把最终跳转的 `login.live.com/oauth20_desktop.srf?code=...` URL 粘贴回终端（Live Connect 拒绝 localhost 回调）；
+- 账号会标记为 `legacy`，之后自动用 `login.live.com` 刷新 token；
+- 用的是官方启动器的应用标识，不受官方支持，微软可能随时限制；仅建议在注册自己的 Azure 应用前临时使用。
+
+默认的 `shccl login microsoft` 仍然要求构建时注入自己的 client ID，走设备码流程。
 
 ## 核心流程
 
@@ -239,13 +287,13 @@ sdl3 = { version = "0.20", features = ["main", "ttf", "build-from-source-static"
 
 ## 安全与隐私
 
-- 当前只保存离线账号，不涉及 Microsoft token。
-- 所有启动参数中的访问令牌在离线模式下为占位值 `0`。
+- 离线账号只保存用户名与 UUID；Microsoft 账号会保存访问令牌与刷新令牌，`accounts.json` 在 Unix 上权限为 `0600`。
+- Microsoft 登录默认使用设备码流程，不需要在本机监听回调端口，也不会保存账号密码；`--legacy` 回退使用旧版 Live Connect，需要手动粘贴回调 URL。
+- 离线模式下的访问令牌为占位值 `0`；Microsoft 模式使用刷新后的真实令牌。
 - 启动的游戏在 CLI 中继承终端的 stdin/stdout/stderr；TUI/GUI 使用 `capture_output` 将日志转发到界面，不读写游戏 stdin。
 
 ## 后续计划
 
-- Microsoft 设备码登录与 token 刷新
 - Fabric / Forge / NeoForge 等加载器安装
 - Java runtime 自动下载与版本选择
 - 多实例隔离与实例级配置

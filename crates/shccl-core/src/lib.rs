@@ -1,4 +1,4 @@
-//! Core download, offline authentication and launch logic for SHCCL.
+//! Core download, authentication and launch logic for SHCCL.
 //!
 //! The crate intentionally keeps UI concerns out of the core. Frontends create a
 //! [`Launcher`], pass a [`ProgressSink`] for status updates, and own any terminal
@@ -11,6 +11,7 @@ pub mod error;
 pub mod java;
 pub mod launch;
 mod launcher;
+pub mod microsoft;
 pub mod paths;
 pub mod progress;
 mod util;
@@ -22,6 +23,7 @@ pub use error::{Error, Result};
 pub use java::{JavaRuntime, detect_java};
 pub use launch::{LaunchHandle, LaunchPlan, LaunchRequest};
 pub use launcher::{InstallReport, InstalledVersionSummary, Launcher};
+pub use microsoft::{DeviceCode, MicrosoftAuth, MinecraftProfile, MinecraftSession, MsTokens};
 pub use paths::LauncherPaths;
 pub use progress::{
     LogStream, Phase, ProgressEvent, ProgressSink, channel_progress, noop_progress,
