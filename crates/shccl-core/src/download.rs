@@ -35,6 +35,14 @@ impl Downloader {
         }
     }
 
+    /// Clone this downloader with a different parallelism limit.
+    pub(crate) fn with_concurrency(&self, concurrency: usize) -> Self {
+        Self {
+            http: self.http.clone(),
+            concurrency: concurrency.clamp(1, 64),
+        }
+    }
+
     pub(crate) async fn fetch_json<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
         let response = self.http.get(url).send().await?.error_for_status()?;
         Ok(response.json::<T>().await?)

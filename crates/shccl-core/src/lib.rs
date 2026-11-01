@@ -18,7 +18,7 @@ mod util;
 pub mod version;
 
 pub use auth::{Account, AccountKind, AccountStore, offline_uuid};
-pub use config::LauncherConfig;
+pub use config::{InstanceConfig, LauncherConfig};
 pub use error::{Error, Result};
 pub use java::{JavaRuntime, detect_java};
 pub use launch::{LaunchHandle, LaunchPlan, LaunchRequest};

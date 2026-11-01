@@ -180,7 +180,7 @@ fn draw_dashboard(frame: &mut Frame, app: &App, area: Rect) {
             .game_dir
             .as_ref()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "(launcher root)".to_string()),
+            .unwrap_or_else(|| "(per-version directory)".to_string()),
     ));
     lines.push(field(
         "Download concurrency",
@@ -524,7 +524,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, area: Rect) {
     let items: Vec<ListItem> = Setting::ALL
         .iter()
         .map(|setting| {
-            let suffix = if setting.clearable() {
+            let suffix = if setting.clearable(app.settings_scope.is_version()) {
                 "   [c clear]"
             } else {
                 ""
@@ -717,7 +717,10 @@ fn draw_help(frame: &mut Frame) {
             "Accounts",
             "a add offline account · m Microsoft sign-in · Enter select",
         ),
-        help_line("Settings", "Enter edit · c clear · s show config JSON"),
+        help_line(
+            "Settings",
+            "Enter edit · c clear · t target · s show config JSON",
+        ),
         help_line("Logs", "c clear · mouse wheel scrolls"),
         Line::from(""),
         help_line(
@@ -759,7 +762,7 @@ fn draw_modal(frame: &mut Frame, app: &App) {
 
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            modal.prompt,
+            modal.prompt.as_str(),
             Style::default().fg(Color::Gray),
         ))),
         chunks[0],
@@ -920,7 +923,9 @@ fn help_text(page: Page) -> &'static str {
         Page::Accounts => {
             "↑/↓ move · Enter select · a add offline account · m Microsoft sign-in · ? help"
         }
-        Page::Settings => "↑/↓ move · Enter edit · c clear · s show config JSON · ? help",
+        Page::Settings => {
+            "↑/↓ move · Enter edit · c clear · t target · s show config JSON · ? help"
+        }
         Page::Logs => "↑/↓ scroll · PgUp/PgDn · Home oldest · End tail · c clear · ? help",
     }
 }

@@ -53,20 +53,28 @@ impl LauncherPaths {
         self.assets_dir().join("virtual").join(index)
     }
 
-    pub fn instances_dir(&self) -> PathBuf {
-        self.root.join("instances")
-    }
-
-    pub fn instance_dir(&self, version_id: &str) -> PathBuf {
-        self.instances_dir().join(version_id)
-    }
-
     pub fn logs_dir(&self) -> PathBuf {
         self.root.join("logs")
     }
 
     pub fn version_dir(&self, version_id: &str) -> PathBuf {
         self.versions_dir().join(version_id)
+    }
+
+    /// Per-version settings. Keeping them next to the version files means a
+    /// version directory can be copied or backed up with its configuration.
+    pub fn version_config_file(&self, version_id: &str) -> PathBuf {
+        self.version_dir(version_id).join("shccl.json")
+    }
+
+    /// Default working directory for an isolated version.
+    ///
+    /// Following the standard `.minecraft` layout, each version gets its own
+    /// `versions/<version_id>` directory for `saves`, `mods`, `resourcepacks`,
+    /// `options.txt` and logs, while `libraries`, `assets` and the installed
+    /// version files remain shared under the launcher root.
+    pub fn version_game_dir(&self, version_id: &str) -> PathBuf {
+        self.version_dir(version_id)
     }
 
     pub fn version_json(&self, version_id: &str) -> PathBuf {
@@ -106,7 +114,6 @@ impl LauncherPaths {
             self.assets_dir(),
             self.indexes_dir(),
             self.objects_dir(),
-            self.instances_dir(),
             self.logs_dir(),
         ] {
             std::fs::create_dir_all(&dir)?;
@@ -156,4 +163,58 @@ fn default_root() -> PathBuf {
     env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
         .join(".shccl")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let unique = format!(
+            "shccl-paths-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
+    }
+
+    #[test]
+    fn version_layout_holds_settings_and_game_data() {
+        let root = temp_root("layout");
+        let paths = LauncherPaths::resolve(Some(root.clone()));
+        assert_eq!(
+            paths.version_config_file("1.21.4"),
+            root.join("versions/1.21.4/shccl.json")
+        );
+        assert_eq!(
+            paths.version_game_dir("1.21.4"),
+            root.join("versions/1.21.4")
+        );
+    }
+
+    #[test]
+    fn ensure_does_not_create_instances_dir() {
+        let root = temp_root("no-instances");
+        let paths = LauncherPaths::resolve(Some(root.clone()));
+        paths.ensure().unwrap();
+        assert!(!root.join("instances").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ensure_keeps_existing_instances_dir() {
+        let root = temp_root("legacy-data");
+        std::fs::create_dir_all(root.join("instances")).unwrap();
+        std::fs::write(root.join("instances/file.txt"), b"data").unwrap();
+        let paths = LauncherPaths::resolve(Some(root.clone()));
+        paths.ensure().unwrap();
+        assert_eq!(
+            std::fs::read(root.join("instances/file.txt")).unwrap(),
+            b"data"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

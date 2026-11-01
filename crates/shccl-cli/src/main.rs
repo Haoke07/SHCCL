@@ -56,6 +56,11 @@ enum Command {
 
     /// Show or change launcher settings.
     Config {
+        /// Edit settings for a specific version instead of the launcher-wide
+        /// defaults.
+        #[arg(long, global = true, value_name = "VERSION")]
+        version: Option<String>,
+
         #[command(subcommand)]
         action: ConfigAction,
     },
@@ -101,7 +106,8 @@ struct LaunchArgs {
     #[arg(long)]
     java: Option<PathBuf>,
 
-    /// Game directory (defaults to the launcher root).
+    /// Game directory (defaults to the configured directory or the version
+    /// directory).
     #[arg(long)]
     game_dir: Option<PathBuf>,
 
@@ -128,7 +134,8 @@ struct LaunchArgs {
 
 #[derive(Debug, Subcommand)]
 enum ConfigAction {
-    /// Print the current configuration as JSON.
+    /// Print the current configuration as JSON. With --version, prints the
+    /// effective settings used to launch that version.
     Show,
     /// Set the Java executable or JAVA_HOME.
     SetJava { path: PathBuf },
@@ -139,13 +146,19 @@ enum ConfigAction {
     /// Set parallel download count (1-64).
     SetConcurrency { value: usize },
     /// Set the version used when `launch` has no argument.
-    SetDefaultVersion { version: String },
+    SetDefaultVersion {
+        /// Version id, for example 1.21.4.
+        #[arg(value_name = "VERSION")]
+        id: String,
+    },
     /// Clear the default version.
     ClearDefaultVersion,
     /// Set a game directory (relative paths are resolved against the root).
     SetGameDir { path: PathBuf },
-    /// Use the launcher root as the game directory.
+    /// Use the default game directory for the selected version.
     ClearGameDir,
+    /// Remove every per-version override (requires --version).
+    Reset,
 }
 
 #[tokio::main]
@@ -168,7 +181,7 @@ async fn main() -> Result<()> {
         Command::Accounts => accounts(&launcher),
         Command::Select { account } => select(&launcher, &account),
         Command::Launch(args) => launch(&launcher, args).await,
-        Command::Config { action } => config(&launcher, action),
+        Command::Config { version, action } => config(&launcher, version.as_deref(), action),
     }
 }
 
@@ -428,10 +441,21 @@ async fn launch(launcher: &Launcher, args: LaunchArgs) -> Result<()> {
     }
 }
 
-fn config(launcher: &Launcher, action: ConfigAction) -> Result<()> {
+fn config(launcher: &Launcher, version: Option<&str>, action: ConfigAction) -> Result<()> {
+    let suffix = version
+        .map(|version| format!(" for version {version}"))
+        .unwrap_or_default();
+
     match action {
         ConfigAction::Show => {
-            let config = launcher.config();
+            let config = match version {
+                Some(version) => {
+                    let mut config = launcher.effective_config(version)?;
+                    config.game_dir = Some(launcher.game_dir(version)?);
+                    config
+                }
+                None => launcher.config(),
+            };
             println!("{}", serde_json::to_string_pretty(&config)?);
         }
         ConfigAction::SetJava { path } => {
@@ -439,42 +463,107 @@ fn config(launcher: &Launcher, action: ConfigAction) -> Result<()> {
                 bail!("Java path does not exist: {}", path.display());
             }
             let path = path.canonicalize().unwrap_or(path);
-            launcher.update_config(|config| config.java_path = Some(path.clone()))?;
-            println!("Java path set to {}.", path.display());
+            match version {
+                Some(version) => {
+                    launcher.update_instance_config(version, |config| {
+                        config.java_path = Some(path.clone())
+                    })?;
+                }
+                None => {
+                    launcher.update_config(|config| config.java_path = Some(path.clone()))?;
+                }
+            }
+            println!("Java path{suffix} set to {}.", path.display());
         }
         ConfigAction::ClearJava => {
-            launcher.update_config(|config| config.java_path = None)?;
-            println!("Java path cleared; JAVA_HOME/PATH will be used.");
+            match version {
+                Some(version) => {
+                    launcher.update_instance_config(version, |config| config.java_path = None)?;
+                }
+                None => {
+                    launcher.update_config(|config| config.java_path = None)?;
+                }
+            }
+            println!("Java path{suffix} cleared; JAVA_HOME/PATH will be used.");
         }
         ConfigAction::SetMemory { mb } => {
             if !(512..=65_536).contains(&mb) {
                 bail!("memory must be between 512 and 65536 MiB");
             }
-            launcher.update_config(|config| config.memory_mb = mb)?;
-            println!("Memory set to {mb} MiB.");
+            match version {
+                Some(version) => {
+                    launcher
+                        .update_instance_config(version, |config| config.memory_mb = Some(mb))?;
+                }
+                None => {
+                    launcher.update_config(|config| config.memory_mb = mb)?;
+                }
+            }
+            println!("Memory{suffix} set to {mb} MiB.");
         }
         ConfigAction::SetConcurrency { value } => {
             if !(1..=64).contains(&value) {
                 bail!("download concurrency must be between 1 and 64");
             }
-            launcher.update_config(|config| config.download_concurrency = value)?;
-            println!("Download concurrency set to {value}.");
+            match version {
+                Some(version) => {
+                    launcher.update_instance_config(version, |config| {
+                        config.download_concurrency = Some(value)
+                    })?;
+                }
+                None => {
+                    launcher.update_config(|config| config.download_concurrency = value)?;
+                }
+            }
+            println!("Download concurrency{suffix} set to {value}.");
         }
-        ConfigAction::SetDefaultVersion { version } => {
-            launcher.update_config(|config| config.default_version = Some(version.clone()))?;
-            println!("Default version set to {version}.");
+        ConfigAction::SetDefaultVersion { id: default } => {
+            if version.is_some() {
+                bail!("the default version is a launcher-wide setting; omit --version");
+            }
+            launcher.update_config(|config| config.default_version = Some(default.clone()))?;
+            println!("Default version set to {default}.");
         }
         ConfigAction::ClearDefaultVersion => {
+            if version.is_some() {
+                bail!("the default version is a launcher-wide setting; omit --version");
+            }
             launcher.update_config(|config| config.default_version = None)?;
             println!("Default version cleared.");
         }
         ConfigAction::SetGameDir { path } => {
-            launcher.update_config(|config| config.game_dir = Some(path.clone()))?;
-            println!("Game directory set to {}.", path.display());
+            match version {
+                Some(version) => {
+                    launcher.update_instance_config(version, |config| {
+                        config.game_dir = Some(path.clone())
+                    })?;
+                }
+                None => {
+                    launcher.update_config(|config| config.game_dir = Some(path.clone()))?;
+                }
+            }
+            println!("Game directory{suffix} set to {}.", path.display());
         }
-        ConfigAction::ClearGameDir => {
-            launcher.update_config(|config| config.game_dir = None)?;
-            println!("Game directory cleared; the launcher root will be used.");
+        ConfigAction::ClearGameDir => match version {
+            Some(version) => {
+                launcher.update_instance_config(version, |config| config.game_dir = None)?;
+                println!(
+                    "Game directory for version {version} cleared; the launcher-wide directory (or versions/{version}) will be used."
+                );
+            }
+            None => {
+                launcher.update_config(|config| config.game_dir = None)?;
+                println!(
+                    "Game directory cleared; each version will use its own directory unless it overrides game_dir."
+                );
+            }
+        },
+        ConfigAction::Reset => {
+            let Some(version) = version else {
+                bail!("reset requires --version VERSION");
+            };
+            launcher.reset_instance_config(version)?;
+            println!("Per-version settings for {version} cleared.");
         }
     }
     Ok(())

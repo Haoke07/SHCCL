@@ -418,7 +418,7 @@ impl Painter<'_> {
                 .game_dir
                 .as_ref()
                 .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "launcher root".to_string()),
+                .unwrap_or_else(|| "per-version directories".to_string()),
             max_chars,
         )?;
         y += LINE_HEIGHT;
@@ -779,76 +779,42 @@ impl Painter<'_> {
     fn settings(&mut self, app: &App) -> Result<()> {
         let main = main_rect();
         self.fill(main, PANEL)?;
-        self.page_heading(main, "Settings", "shccl.json")?;
+        let subtitle = match app.settings_scope.version() {
+            Some(version) => format!("versions/{version}/shccl.json"),
+            None => "shccl.json".to_string(),
+        };
+        self.page_heading(main, "Settings", &subtitle)?;
 
         let x = main.x + 12.0;
         let width = main.w - 24.0;
-        let mut y = main.y + 30.0;
+        let mut y = main.y + 28.0;
 
-        let java = app
-            .config
-            .java_path
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "auto (JAVA_HOME / PATH)".to_string());
-        self.setting_row(
-            FRect::new(x, y, width, 40.0),
-            "Java path",
-            &java,
-            Setting::Java,
-        )?;
-        y += 44.0;
+        for setting in Setting::ALL {
+            let value = app.setting_value(setting);
+            self.setting_row(
+                FRect::new(x, y, width, 36.0),
+                setting.label(),
+                &value,
+                setting,
+                app.settings_scope.is_version(),
+            )?;
+            y += 40.0;
+        }
 
-        self.setting_row(
-            FRect::new(x, y, width, 40.0),
-            "Memory",
-            &format!("{} MiB", app.config.memory_mb),
-            Setting::Memory,
-        )?;
-        y += 44.0;
-
-        self.setting_row(
-            FRect::new(x, y, width, 40.0),
-            "Download concurrency",
-            &format!("{} parallel downloads", app.config.download_concurrency),
-            Setting::Concurrency,
-        )?;
-        y += 44.0;
-
-        self.setting_row(
-            FRect::new(x, y, width, 40.0),
-            "Default version",
-            app.config.default_version.as_deref().unwrap_or("none"),
-            Setting::DefaultVersion,
-        )?;
-        y += 44.0;
-
-        let game_dir = app
-            .config
-            .game_dir
-            .as_ref()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "launcher root".to_string());
-        self.setting_row(
-            FRect::new(x, y, width, 40.0),
-            "Game directory",
-            &game_dir,
-            Setting::GameDir,
-        )?;
-
-        let action_y = main.y + main.h - 26.0;
+        let action_y = main.y + main.h - 24.0;
         self.button(
             FRect::new(x, action_y, 122.0, 22.0),
             "Show config JSON",
             Action::ShowConfig,
         )?;
-        self.text_clipped(
-            &format!("stored at {}", app.launcher.paths().config_file().display()),
-            x + 132.0,
-            action_y + 7.0,
-            42,
-            MUTED,
-        )
+        let stored_at = match app.settings_scope.version() {
+            Some(version) => format!(
+                "stored at {}",
+                app.launcher.paths().version_config_file(version).display()
+            ),
+            None => format!("stored at {}", app.launcher.paths().config_file().display()),
+        };
+        self.text_clipped(&stored_at, x + 132.0, action_y + 7.0, 42, MUTED)
     }
 
     fn setting_row(
@@ -857,28 +823,34 @@ impl Painter<'_> {
         label: &str,
         value: &str,
         setting: Setting,
+        version_scope: bool,
     ) -> Result<()> {
         self.fill(rect, PANEL_LIGHT)?;
         self.outline(rect, BORDER)?;
-        self.text(label, rect.x + 10.0, rect.y + 6.0, MUTED)?;
+        self.text(label, rect.x + 10.0, rect.y + 4.0, MUTED)?;
         self.text_clipped(
             value,
             rect.x + 10.0,
-            rect.y + 21.0,
+            rect.y + 19.0,
             ((rect.w - 140.0) / self.char_width) as usize,
             TEXT,
         )?;
 
         let clear_x = rect.x + rect.w - 10.0 - 48.0;
         let set_x = clear_x - 6.0 - 58.0;
+        let set_label = if setting == Setting::Scope {
+            "Change"
+        } else {
+            "Set..."
+        };
         self.button(
-            FRect::new(set_x, rect.y + 10.0, 58.0, 20.0),
-            "Set...",
+            FRect::new(set_x, rect.y + 8.0, 58.0, 20.0),
+            set_label,
             Action::EditSetting(setting),
         )?;
-        if setting.clearable() {
+        if setting.clearable(version_scope) {
             self.button(
-                FRect::new(clear_x, rect.y + 10.0, 48.0, 20.0),
+                FRect::new(clear_x, rect.y + 8.0, 48.0, 20.0),
                 "Clear",
                 Action::ClearSetting(setting),
             )?;
@@ -1029,9 +1001,9 @@ impl Painter<'_> {
         self.fill(rect, PANEL)?;
         self.outline(rect, ACCENT)?;
 
-        self.text(modal.title, rect.x + 14.0, rect.y + 12.0, ACCENT)?;
+        self.text(modal.title.as_str(), rect.x + 14.0, rect.y + 12.0, ACCENT)?;
         self.text_clipped(
-            modal.prompt,
+            modal.prompt.as_str(),
             rect.x + 14.0,
             rect.y + 30.0,
             ((rect.w - 28.0) / self.char_width) as usize,
@@ -1236,7 +1208,7 @@ fn page_hint(page: Page) -> &'static str {
         Page::Dashboard => "Root, Java, account overview",
         Page::Versions => "Up/Down select   Enter action",
         Page::Accounts => "Up/Down select   Enter use   M Microsoft",
-        Page::Settings => "Click Set... to edit",
+        Page::Settings => "Click Set.../Change   T target",
         Page::Logs => "Up/Down scroll   C clear",
     }
 }

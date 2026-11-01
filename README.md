@@ -8,10 +8,10 @@ SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前
 
 | 组件 | 状态 | 说明 |
 | --- | --- | --- |
-| `shccl-core` | 可用 | 版本清单、版本 JSON、客户端/库/资源下载、natives 解压、离线账号、Microsoft 设备码登录与 token 刷新、Java 检测、启动命令构建与进程启动 |
-| `shccl-cli` | 可用 | 安装、离线 / Microsoft 登录、账号选择、启动、配置、诊断 |
-| `shccl-tui` | 可用 | 基于 ratatui/crossterm 的完整终端界面：仪表盘、版本安装/启动、离线 / Microsoft 账号、设置、日志与进度 |
-| `shccl-gui` | 可用 | 基于 SDL3 的完整界面：仪表盘、版本安装/启动、离线 / Microsoft 账号、设置、日志与进度 |
+| `shccl-core` | 可用 | 版本清单、版本 JSON、客户端/库/资源下载、natives 解压、离线账号、Microsoft 设备码登录与 token 刷新、Java 检测、启动命令构建与进程启动、版本级设置与版本隔离工作目录 |
+| `shccl-cli` | 可用 | 安装、离线 / Microsoft 登录、账号选择、启动、全局与版本级配置、诊断 |
+| `shccl-tui` | 可用 | 基于 ratatui/crossterm 的完整终端界面：仪表盘、版本安装/启动、离线 / Microsoft 账号、全局与版本级设置、日志与进度 |
+| `shccl-gui` | 可用 | 基于 SDL3 的完整界面：仪表盘、版本安装/启动、离线 / Microsoft 账号、全局与版本级设置、日志与进度 |
 
 > 离线账号仅用于离线游戏与离线服务器；Microsoft 账号可用于正版服务器，启动前会自动刷新过期 token。
 
@@ -91,22 +91,51 @@ shccl select <USERNAME|UUID>
 shccl launch [VERSION] [--account NAME] [--java PATH] [--memory MiB]
               [--game-dir DIR] [--width W --height H] [--dry-run]
               [-- GAME_ARGS...]
-shccl config show
-shccl config set-java <PATH>
-shccl config clear-java
-shccl config set-memory <MiB>
-shccl config set-concurrency <1-64>
+shccl config show [--version VERSION]
+shccl config set-java <PATH> [--version VERSION]
+shccl config clear-java [--version VERSION]
+shccl config set-memory <MiB> [--version VERSION]
+shccl config set-concurrency <1-64> [--version VERSION]
 shccl config set-default-version <VERSION>
 shccl config clear-default-version
-shccl config set-game-dir <DIR>
-shccl config clear-game-dir
+shccl config set-game-dir <DIR> [--version VERSION]
+shccl config clear-game-dir [--version VERSION]
+shccl config reset --version VERSION
 ```
+
+`config` 不带 `--version` 时修改启动器全局默认值；带 `--version` 时只修改该版本的覆盖项。`config show --version` 输出该版本实际生效的设置（包含继承自全局的字段和默认游戏目录）。
 
 `launch` 在目标版本未安装时会自动执行安装。
 
 ## 配置
 
-配置保存在 `<root>/shccl.json`：
+配置分为两层：
+
+- 启动器全局默认值：`<root>/shccl.json`；
+- 版本级覆盖：`<root>/versions/<version_id>/shccl.json`。
+
+版本级文件只保存该版本显式设置的字段，未设置的字段继承全局默认值。默认情况下每个版本使用自己的 `versions/<version_id>` 作为工作/游戏目录（版本隔离）：`saves`、`mods`、`resourcepacks`、`options.txt` 等互不影响，而 `versions` 中的版本文件、`libraries`、`assets` 仍然共享。
+
+如需让多个版本共用同一游戏目录，把它们的 `game_dir` 指向同一路径即可；其它设置（内存、Java、JVM/游戏参数等）仍然各自独立：
+
+```bash
+shccl config set-memory 8192 --version 1.21.4
+shccl config set-game-dir /games/shared --version 1.21.4
+shccl config set-game-dir /games/shared --version 1.20.1
+shccl config show --version 1.21.4
+shccl config reset --version 1.21.4
+```
+
+游戏目录解析顺序：
+
+1. `launch --game-dir`；
+2. 版本级配置的 `game_dir`；
+3. 全局配置的 `game_dir`（可作为所有版本的共享目录）；
+4. `versions/<version_id>`（默认的版本隔离目录）。
+
+相对路径相对于 launcher root 解析。
+
+全局默认值示例：
 
 ```json
 {
@@ -120,7 +149,18 @@ shccl config clear-game-dir
 }
 ```
 
-`game_dir` 为空时使用 launcher root 作为游戏目录（与标准 `.minecraft` 一致），已有的 `saves`、`resourcepacks`、`options.txt` 可以直接复用。相对路径会相对于 root 解析。
+版本级覆盖示例（只保存与全局不同的字段）：
+
+```json
+{
+  "memory_mb": 8192,
+  "game_dir": "/games/shared"
+}
+```
+
+`game_dir` 为空时不会再把 launcher root 当作所有版本的游戏目录，而是使用该版本自己的 `versions/<version_id>`。已有的 `saves`、`resourcepacks`、`options.txt` 如需继续复用，可以把全局或版本级 `game_dir` 指向原目录。
+
+TUI 与 GUI 的 Settings 页面顶部有 `Target` 行，可在 Global defaults 和已安装版本之间切换；选中版本后编辑的设置写入 `versions/<id>/shccl.json`，其余版本不受影响。`Default version` 始终是全局设置。
 
 账号保存在 `<root>/accounts.json`。在 Unix 系统上写入时会设置为 `0600` 权限。
 
@@ -232,21 +272,21 @@ cargo run -p shccl-tui
 cargo run -p shccl-tui -- --root /path/to/.minecraft
 ```
 
-TUI 与 CLI/GUI 功能同步，所有操作都会写入同一份 `shccl.json` 和 `accounts.json`：
+TUI 与 CLI/GUI 功能同步：全局设置和账号共享同一份 `shccl.json`、`accounts.json`，版本级设置写入各自的 `versions/<id>/shccl.json`。
 
 | 页面 | 对应 CLI | 功能 |
 | --- | --- | --- |
 | Dashboard | `doctor` | Root、配置文件、Java 检测、账号、已安装版本、内存与默认版本 |
 | Versions | `versions` / `install` / `launch` | 浏览已安装版本、加载远端清单、过滤、安装、修复/校验、启动、预览启动命令、设为默认 |
 | Accounts | `login offline` / `login microsoft` / `accounts` / `select` | 添加并选中离线账号、Microsoft 设备码登录、切换当前账号 |
-| Settings | `config ...` | Java 路径、内存、下载并发、默认版本、游戏目录，以及查看配置 JSON |
+| Settings | `config ...` | 选择全局默认值或某个已安装版本，编辑 Java 路径、内存、下载并发、游戏目录，并查看配置 JSON；默认版本为全局设置 |
 | Logs | - | 安装进度、启动命令、游戏 stdout/stderr |
 
 操作方式：
 
 - `1`–`5` 切换页面，`Tab` / `Shift+Tab` 循环切换；`↑`/`↓` 或 `j`/`k` 移动选择，`PgUp`/`PgDn` 翻页，`Home`/`End` 跳到首尾。
 - `Enter` 执行当前页面的主要操作（启动/安装/选择账号/编辑设置）；Versions 页面中 `←`/`→` 切换 Installed/Remote，`i` 安装指定版本、`l` 加载远端清单、`f` 过滤、`d` 设为默认、`p` 预览启动命令、`v` 校验并修复。
-- Accounts 页面 `a` 添加离线账号，`m` 使用 Microsoft 设备码登录（弹窗显示验证网址与代码，`Esc` 取消）；Settings 页面 `Enter` 编辑、`c` 清除可清除项、`s` 以 JSON 输出配置到 Logs；Logs 页面 `c` 清空日志。
+- Accounts 页面 `a` 添加离线账号，`m` 使用 Microsoft 设备码登录（弹窗显示验证网址与代码，`Esc` 取消）；Settings 页面 `Enter` 编辑、`c` 清除可清除项、`t` 切换全局/版本目标、`s` 以 JSON 输出配置到 Logs；Logs 页面 `c` 清空日志。
 - `r` 刷新本地状态并重新检测 Java；`?` / `F1` 打开快捷键帮助；`q`/`Esc` 退出（弹窗打开时 `Esc` 关闭弹窗）。
 - 输入框支持 `Ctrl+A` 全选，`←`/`→`、`Home`/`End` 移动光标，`Enter` 保存，`Esc` 取消。
 - 鼠标滚轮可滚动列表与日志，点击页签、版本页签和列表行可切换页面或选择条目。
@@ -260,14 +300,14 @@ cargo run -p shccl-gui
 cargo run -p shccl-gui -- --root /path/to/.minecraft
 ```
 
-GUI 与 CLI 功能同步，所有操作都会写入同一份 `shccl.json` 和 `accounts.json`：
+GUI 与 CLI 功能同步：全局设置和账号共享同一份 `shccl.json`、`accounts.json`，版本级设置写入各自的 `versions/<id>/shccl.json`。
 
 | 页面 | 对应 CLI | 功能 |
 | --- | --- | --- |
 | Dashboard | `doctor` | Root、配置文件、Java 检测、账号、已安装版本、内存与默认版本 |
 | Versions | `versions` / `install` / `launch` | 浏览已安装版本、加载远端清单、过滤、安装、修复/校验、启动、预览启动命令、设为默认 |
 | Accounts | `login offline` / `login microsoft` / `accounts` / `select` | 添加并选中离线账号、Microsoft 设备码登录、切换当前账号 |
-| Settings | `config ...` | Java 路径、内存、下载并发、默认版本、游戏目录，以及查看配置 JSON |
+| Settings | `config ...` | 选择全局默认值或某个已安装版本，编辑 Java 路径、内存、下载并发、游戏目录，并查看配置 JSON；默认版本为全局设置 |
 | Logs | - | 安装进度、启动命令、游戏 stdout/stderr |
 
 操作方式：
@@ -275,7 +315,7 @@ GUI 与 CLI 功能同步，所有操作都会写入同一份 `shccl.json` 和 `a
 - 鼠标点击侧边栏、列表行和按钮；滚轮滚动列表与日志。
 - `1`–`5` 切换页面，`Tab` 循环切换；`↑`/`↓` 或 `j`/`k` 移动选择。
 - `Enter` 执行当前操作（安装/启动/选择账号）；Versions 页面中 `I` 安装指定版本、`L` 加载远端清单、`F` 过滤、`D` 设为默认、`P` 预览启动命令。
-- Accounts 页面 `A` 添加离线账号，`M` 或点击 `Microsoft sign-in` 使用设备码登录（弹窗显示验证网址与代码，`Esc` 或 Cancel 取消）；Logs 页面 `C` 清空日志。
+- Accounts 页面 `A` 添加离线账号，`M` 或点击 `Microsoft sign-in` 使用设备码登录（弹窗显示验证网址与代码，`Esc` 或 Cancel 取消）；Settings 页面点击 `Target` 行的 `Change`（或按 `T`）切换全局/版本目标；Logs 页面 `C` 清空日志。
 - `R` 刷新本地状态并重新检测 Java；`Q`/`Esc` 退出（弹窗打开时 `Esc` 关闭弹窗）。
 - 输入框支持 `Ctrl+A` 全选，`←`/`→`、`Home`/`End` 移动光标，`Enter` 保存。
 
@@ -302,7 +342,6 @@ sdl3 = { version = "0.20", features = ["main", "ttf", "build-from-source-static"
 
 - Fabric / Forge / NeoForge 等加载器安装
 - Java runtime 自动下载与版本选择
-- 多实例隔离与实例级配置
 
 ## License
 

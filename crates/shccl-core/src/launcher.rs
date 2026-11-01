@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::auth::{Account, AccountStore};
-use crate::config::LauncherConfig;
+use crate::config::{InstanceConfig, LauncherConfig};
 use crate::download::{DownloadTask, Downloader, build_http_client};
 use crate::error::{Error, Result};
 use crate::java::detect_java;
@@ -60,6 +60,57 @@ impl Launcher {
 
     pub fn config(&self) -> LauncherConfig {
         read_lock(&self.inner.config).clone()
+    }
+
+    /// Per-version settings stored in `versions/<version_id>/shccl.json`.
+    ///
+    /// Missing files yield an empty override set, so every version starts with
+    /// the launcher-wide settings and its own isolated working directory.
+    pub fn instance_config(&self, version_id: &str) -> Result<InstanceConfig> {
+        validate_version_id(version_id)?;
+        InstanceConfig::load(&self.inner.paths.version_config_file(version_id))
+    }
+
+    /// Update this version's overrides and persist them next to the version.
+    pub fn update_instance_config<F>(&self, version_id: &str, update: F) -> Result<InstanceConfig>
+    where
+        F: FnOnce(&mut InstanceConfig),
+    {
+        let mut config = self.instance_config(version_id)?;
+        update(&mut config);
+        if config.is_empty() {
+            self.reset_instance_config(version_id)?;
+        } else {
+            config.save(&self.inner.paths.version_config_file(version_id))?;
+        }
+        Ok(config)
+    }
+
+    /// Remove all per-version overrides. Game data is not touched.
+    pub fn reset_instance_config(&self, version_id: &str) -> Result<()> {
+        validate_version_id(version_id)?;
+        let path = self.inner.paths.version_config_file(version_id);
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Launcher-wide settings with this version's overrides applied.
+    pub fn effective_config(&self, version_id: &str) -> Result<LauncherConfig> {
+        Ok(self.instance_config(version_id)?.apply_to(&self.config()))
+    }
+
+    /// Working directory used for a version when a launch does not override it.
+    pub fn game_dir(&self, version_id: &str) -> Result<PathBuf> {
+        let config = self.effective_config(version_id)?;
+        Ok(launch::resolve_game_dir(
+            &self.inner.paths,
+            version_id,
+            None,
+            &config,
+        ))
     }
 
     pub fn update_config<F>(&self, update: F) -> Result<LauncherConfig>
@@ -245,6 +296,11 @@ impl Launcher {
                 continue;
             }
             let json_path = self.inner.paths.version_json(&id);
+            // A directory may only contain per-version settings before the
+            // version is installed; that is not a broken installation.
+            if !json_path.exists() {
+                continue;
+            }
             let details = match read_json::<VersionDetails>(&json_path) {
                 Ok(details) => details,
                 Err(error) => {
@@ -282,6 +338,10 @@ impl Launcher {
         sink: &ProgressSink,
     ) -> Result<InstallReport> {
         validate_version_id(version_id)?;
+        let downloader = self
+            .inner
+            .downloader
+            .with_concurrency(self.effective_config(version_id)?.download_concurrency());
         let incomplete = self.inner.paths.incomplete_marker(version_id);
         let marker_needed = incomplete.exists()
             || !self.inner.paths.version_json(version_id).exists()
@@ -318,8 +378,7 @@ impl Launcher {
         })?;
         let client_task = DownloadTask::new(client_url, self.inner.paths.version_jar(version_id))
             .with_checksum(client.sha1.clone(), client.size);
-        self.inner
-            .downloader
+        downloader
             .download_all(vec![client_task], Phase::Version, sink)
             .await?;
 
@@ -383,8 +442,7 @@ impl Launcher {
 
         let library_count = library_tasks.len();
         let library_tasks = library_tasks.into_values().collect();
-        self.inner
-            .downloader
+        downloader
             .download_all(library_tasks, Phase::Libraries, sink)
             .await?;
 
@@ -408,7 +466,7 @@ impl Launcher {
         .map_err(|error| Error::Launch(format!("native extraction task failed: {error}")))??;
 
         // Assets.
-        let asset_count = self.install_assets(&details, sink).await?;
+        let asset_count = self.install_assets(&details, sink, &downloader).await?;
 
         sink(ProgressEvent::Step {
             phase: Phase::Version,
@@ -442,7 +500,7 @@ impl Launcher {
         let mut request = request;
         request.account = self.refresh_account(&request.account).await?;
         let details = self.load_installed_details(&request.version_id, &mut HashSet::new())?;
-        let config = self.config();
+        let config = self.effective_config(&request.version_id)?;
         let java_path = request
             .java_path
             .clone()
@@ -466,7 +524,7 @@ impl Launcher {
             return Err(Error::VersionNotInstalled(request.version_id.clone()));
         }
         let details = self.load_installed_details(&request.version_id, &mut HashSet::new())?;
-        let config = self.config();
+        let config = self.effective_config(&request.version_id)?;
         let java_path = request
             .java_path
             .clone()
@@ -555,7 +613,12 @@ impl Launcher {
         Ok(merged)
     }
 
-    async fn install_assets(&self, details: &VersionDetails, sink: &ProgressSink) -> Result<usize> {
+    async fn install_assets(
+        &self,
+        details: &VersionDetails,
+        sink: &ProgressSink,
+        downloader: &Downloader,
+    ) -> Result<usize> {
         let Some(index_ref) = details.asset_index.as_ref() else {
             sink(ProgressEvent::Step {
                 phase: Phase::Assets,
@@ -577,8 +640,7 @@ impl Launcher {
         if let Some(url) = index_ref.url.clone() {
             let task = DownloadTask::new(url, index_path.clone())
                 .with_checksum(index_ref.sha1.clone(), index_ref.size);
-            self.inner
-                .downloader
+            downloader
                 .download_all(vec![task], Phase::Assets, sink)
                 .await?;
         } else if !index_path.exists() {
@@ -608,8 +670,7 @@ impl Launcher {
             phase: Phase::Assets,
             message: format!("downloading {asset_count} asset objects"),
         });
-        self.inner
-            .downloader
+        downloader
             .download_all(tasks.into_values().collect(), Phase::Assets, sink)
             .await?;
 
@@ -716,4 +777,110 @@ fn extract_zip(archive: &Path, destination: &Path, excludes: &[String]) -> Resul
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let unique = format!(
+            "shccl-launcher-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        std::env::temp_dir().join(unique)
+    }
+
+    #[test]
+    fn per_version_settings_are_isolated_and_inherit_the_defaults() {
+        let root = temp_root("instance");
+        let launcher = Launcher::new(Some(root.clone())).unwrap();
+        launcher
+            .update_config(|config| {
+                config.memory_mb = 2048;
+                config.game_dir = Some(PathBuf::from("shared"));
+            })
+            .unwrap();
+        launcher
+            .update_instance_config("1.21.4", |config| {
+                config.memory_mb = Some(8192);
+            })
+            .unwrap();
+
+        // The override only affects its own version and leaves the global
+        // value untouched.
+        assert_eq!(launcher.config().memory_mb, 2048);
+        assert_eq!(launcher.effective_config("1.21.4").unwrap().memory_mb, 8192);
+        assert_eq!(launcher.effective_config("1.20.1").unwrap().memory_mb, 2048);
+
+        // Both versions share the globally configured working directory.
+        assert_eq!(launcher.game_dir("1.21.4").unwrap(), root.join("shared"));
+        assert_eq!(launcher.game_dir("1.20.1").unwrap(), root.join("shared"));
+
+        // Without an explicit directory each version is isolated in its own
+        // version directory.
+        launcher
+            .update_config(|config| config.game_dir = None)
+            .unwrap();
+        assert_eq!(
+            launcher.game_dir("1.21.4").unwrap(),
+            launcher.paths().version_game_dir("1.21.4")
+        );
+        assert_eq!(
+            launcher.game_dir("1.20.1").unwrap(),
+            launcher.paths().version_game_dir("1.20.1")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clearing_every_override_removes_the_version_config_file() {
+        let root = temp_root("empty-instance");
+        let launcher = Launcher::new(Some(root.clone())).unwrap();
+        let path = launcher.paths().version_config_file("1.21.4");
+
+        launcher
+            .update_instance_config("1.21.4", |config| config.memory_mb = Some(8192))
+            .unwrap();
+        assert!(path.exists());
+
+        launcher
+            .update_instance_config("1.21.4", |config| config.memory_mb = None)
+            .unwrap();
+        assert!(!path.exists());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn per_version_working_directory_can_be_shared() {
+        let root = temp_root("shared");
+        let launcher = Launcher::new(Some(root.clone())).unwrap();
+        let shared = root.join("saves-shared");
+        for version in ["1.21.4", "1.20.1"] {
+            launcher
+                .update_instance_config(version, |config| {
+                    config.game_dir = Some(shared.clone());
+                })
+                .unwrap();
+        }
+        launcher
+            .update_instance_config("1.21.4", |config| config.memory_mb = Some(8192))
+            .unwrap();
+
+        assert_eq!(launcher.game_dir("1.21.4").unwrap(), shared);
+        assert_eq!(launcher.game_dir("1.20.1").unwrap(), shared);
+        assert_eq!(launcher.effective_config("1.21.4").unwrap().memory_mb, 8192);
+        assert_eq!(
+            launcher.effective_config("1.20.1").unwrap().memory_mb,
+            LauncherConfig::default().memory_mb
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

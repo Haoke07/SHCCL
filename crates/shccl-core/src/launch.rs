@@ -131,18 +131,12 @@ pub(crate) fn build_plan(
         .join(CLASSPATH_SEPARATOR);
 
     let natives_dir = paths.natives_dir(&request.version_id);
-    let working_dir = request
-        .game_dir
-        .clone()
-        .or_else(|| config.game_dir.clone())
-        .map(|dir| {
-            if dir.is_absolute() {
-                dir
-            } else {
-                paths.root().join(dir)
-            }
-        })
-        .unwrap_or_else(|| paths.root().to_path_buf());
+    let working_dir = resolve_game_dir(
+        paths,
+        &request.version_id,
+        request.game_dir.as_ref(),
+        config,
+    );
     std::fs::create_dir_all(&working_dir)?;
 
     let memory = request
@@ -292,6 +286,25 @@ pub(crate) fn build_plan(
         args,
         working_dir,
     })
+}
+
+pub(crate) fn resolve_game_dir(
+    paths: &LauncherPaths,
+    version_id: &str,
+    request_game_dir: Option<&PathBuf>,
+    config: &LauncherConfig,
+) -> PathBuf {
+    request_game_dir
+        .cloned()
+        .or_else(|| config.game_dir.clone())
+        .map(|dir| {
+            if dir.is_absolute() {
+                dir
+            } else {
+                paths.root().join(dir)
+            }
+        })
+        .unwrap_or_else(|| paths.version_game_dir(version_id))
 }
 
 pub(crate) fn spawn(
@@ -471,6 +484,7 @@ mod tests {
         assert!(joined.contains("5627dd98e6be3c21b8a8e92344183641"));
         assert!(joined.contains(library.to_string_lossy().as_ref()));
         assert!(!joined.contains("${"));
+        assert_eq!(plan.working_dir, paths.version_game_dir("test"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

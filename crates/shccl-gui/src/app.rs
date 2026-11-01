@@ -5,8 +5,8 @@ use std::time::Instant;
 use sdl3::keyboard::{Keycode, Mod};
 use sdl3::render::FRect;
 use shccl_core::{
-    Account, AccountStore, DeviceCode, InstalledVersionSummary, LaunchRequest, Launcher,
-    LauncherConfig, LogStream, ProgressEvent, ProgressSink, VersionManifest, detect_java,
+    Account, AccountStore, DeviceCode, InstalledVersionSummary, InstanceConfig, LaunchRequest,
+    Launcher, LauncherConfig, LogStream, ProgressEvent, ProgressSink, VersionManifest, detect_java,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -72,8 +72,36 @@ pub(crate) enum VersionTab {
     Remote,
 }
 
+/// Which settings file the Settings page edits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SettingsScope {
+    Global,
+    Version(String),
+}
+
+impl SettingsScope {
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Global => "Global defaults".to_string(),
+            Self::Version(version) => format!("version {version}"),
+        }
+    }
+
+    pub(crate) fn version(&self) -> Option<&str> {
+        match self {
+            Self::Global => None,
+            Self::Version(version) => Some(version),
+        }
+    }
+
+    pub(crate) fn is_version(&self) -> bool {
+        matches!(self, Self::Version(_))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Setting {
+    Scope,
     Java,
     Memory,
     Concurrency,
@@ -82,11 +110,33 @@ pub(crate) enum Setting {
 }
 
 impl Setting {
-    pub(crate) fn clearable(self) -> bool {
-        matches!(
-            self,
-            Setting::Java | Setting::DefaultVersion | Setting::GameDir
-        )
+    pub(crate) const ALL: [Setting; 6] = [
+        Setting::Scope,
+        Setting::Java,
+        Setting::Memory,
+        Setting::Concurrency,
+        Setting::DefaultVersion,
+        Setting::GameDir,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Setting::Scope => "Target",
+            Setting::Java => "Java path",
+            Setting::Memory => "Memory",
+            Setting::Concurrency => "Download concurrency",
+            Setting::DefaultVersion => "Default version",
+            Setting::GameDir => "Game directory",
+        }
+    }
+
+    pub(crate) fn clearable(self, version_scope: bool) -> bool {
+        match self {
+            Setting::Scope => false,
+            Setting::DefaultVersion => !version_scope,
+            Setting::Java | Setting::GameDir => true,
+            Setting::Memory | Setting::Concurrency => version_scope,
+        }
     }
 }
 
@@ -129,6 +179,7 @@ pub(crate) enum InputAction {
     LoginOffline,
     InstallVersion,
     RemoteFilter,
+    SetSettingsTarget,
     SetJava,
     SetMemory,
     SetConcurrency,
@@ -138,8 +189,8 @@ pub(crate) enum InputAction {
 
 #[derive(Debug, Clone)]
 pub(crate) struct InputModal {
-    pub title: &'static str,
-    pub prompt: &'static str,
+    pub title: String,
+    pub prompt: String,
     pub value: String,
     /// Cursor position measured in characters.
     pub cursor: usize,
@@ -150,16 +201,16 @@ pub(crate) struct InputModal {
 
 impl InputModal {
     fn new(
-        title: &'static str,
-        prompt: &'static str,
+        title: impl Into<String>,
+        prompt: impl Into<String>,
         value: impl Into<String>,
         action: InputAction,
     ) -> Self {
         let value = value.into();
         let cursor = value.chars().count();
         Self {
-            title,
-            prompt,
+            title: title.into(),
+            prompt: prompt.into(),
             value,
             cursor,
             selection: None,
@@ -262,6 +313,10 @@ pub(crate) struct App {
     pub(crate) installed: Vec<InstalledVersionSummary>,
     pub(crate) accounts: AccountStore,
     pub(crate) config: LauncherConfig,
+    /// Which settings file the Settings page edits.
+    pub(crate) settings_scope: SettingsScope,
+    /// Cached overrides for the selected per-version target.
+    pub(crate) instance_config: InstanceConfig,
     pub(crate) manifest: Option<VersionManifest>,
     pub(crate) java: Option<std::result::Result<String, String>>,
     pub(crate) page: Page,
@@ -303,6 +358,8 @@ impl App {
             installed: Vec::new(),
             accounts,
             config,
+            settings_scope: SettingsScope::Global,
+            instance_config: InstanceConfig::default(),
             manifest: None,
             java: None,
             page: Page::Dashboard,
@@ -371,7 +428,64 @@ impl App {
         }
         self.accounts = self.launcher.accounts();
         self.config = self.launcher.config();
+        self.reload_instance_config();
         self.clamp_selections();
+    }
+
+    fn reload_instance_config(&mut self) {
+        let Some(version) = self.settings_scope.version().map(str::to_string) else {
+            self.instance_config = InstanceConfig::default();
+            return;
+        };
+        match self.launcher.instance_config(&version) {
+            Ok(config) => self.instance_config = config,
+            Err(error) => {
+                self.instance_config = InstanceConfig::default();
+                self.set_status(
+                    Level::Error,
+                    format!("Could not read settings for version {version}: {error}"),
+                );
+            }
+        }
+    }
+
+    /// Settings actually used for the current target.
+    fn settings_config(&self) -> LauncherConfig {
+        if self.settings_scope.is_version() {
+            self.instance_config.apply_to(&self.config)
+        } else {
+            self.config.clone()
+        }
+    }
+
+    pub(crate) fn setting_value(&self, setting: Setting) -> String {
+        let config = self.settings_config();
+        match setting {
+            Setting::Scope => self.settings_scope.label(),
+            Setting::Java => config
+                .java_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| "auto (JAVA_HOME / PATH)".to_string()),
+            Setting::Memory => format!("{} MiB", config.memory_mb),
+            Setting::Concurrency => format!("{} parallel downloads", config.download_concurrency),
+            Setting::DefaultVersion => self
+                .config
+                .default_version
+                .clone()
+                .unwrap_or_else(|| "none".to_string()),
+            Setting::GameDir => config
+                .game_dir
+                .as_ref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| {
+                    if self.settings_scope.is_version() {
+                        "(version directory / inherited)".to_string()
+                    } else {
+                        "(per-version directory)".to_string()
+                    }
+                }),
+        }
     }
 
     fn clamp_selections(&mut self) {
@@ -1022,6 +1136,7 @@ impl App {
                 self.detect_java();
                 self.set_status(Level::Info, "Refreshed local state and Java detection.");
             }
+            Keycode::T if self.page == Page::Settings => self.open_setting_modal(Setting::Scope),
             Keycode::Up | Keycode::K => self.move_selection(-1),
             Keycode::Down | Keycode::J => self.move_selection(1),
             Keycode::PageUp => self.move_selection(-(list_rows(self.page) as isize)),
@@ -1287,6 +1402,43 @@ impl App {
         }
     }
 
+    fn update_instance_config<F>(&mut self, update: F) -> bool
+    where
+        F: FnOnce(&mut InstanceConfig),
+    {
+        let Some(version) = self.settings_scope.version().map(str::to_string) else {
+            self.set_status(Level::Error, "Select a version target first.");
+            return false;
+        };
+        match self.launcher.update_instance_config(&version, update) {
+            Ok(config) => {
+                self.instance_config = config;
+                true
+            }
+            Err(error) => {
+                self.set_status(
+                    Level::Error,
+                    format!("Could not save settings for version {version}: {error}"),
+                );
+                false
+            }
+        }
+    }
+
+    fn setting_modal_title(&self, title: &str) -> String {
+        match &self.settings_scope {
+            SettingsScope::Global => title.to_string(),
+            SettingsScope::Version(version) => format!("{title} · {version}"),
+        }
+    }
+
+    fn setting_suffix(&self) -> String {
+        match &self.settings_scope {
+            SettingsScope::Global => String::new(),
+            SettingsScope::Version(version) => format!(" for version {version}"),
+        }
+    }
+
     fn open_login_modal(&mut self) {
         self.modal = Some(InputModal::new(
             "Add offline account",
@@ -1321,11 +1473,22 @@ impl App {
     }
 
     fn open_setting_modal(&mut self, setting: Setting) {
+        let config = self.settings_config();
+        let version_scope = self.settings_scope.is_version();
         let (title, prompt, value, action) = match setting {
+            Setting::Scope => (
+                "Settings target".to_string(),
+                "Global defaults or version id (empty for global):".to_string(),
+                self.settings_scope
+                    .version()
+                    .unwrap_or_default()
+                    .to_string(),
+                InputAction::SetSettingsTarget,
+            ),
             Setting::Java => (
-                "Java path",
-                "Java executable or JAVA_HOME:",
-                self.config
+                self.setting_modal_title("Java path"),
+                "Java executable or JAVA_HOME:".to_string(),
+                config
                     .java_path
                     .as_ref()
                     .map(|path| path.display().to_string())
@@ -1333,27 +1496,32 @@ impl App {
                 InputAction::SetJava,
             ),
             Setting::Memory => (
-                "Memory",
-                "Maximum Java heap in MiB (512-65536):",
-                self.config.memory_mb.to_string(),
+                self.setting_modal_title("Memory"),
+                "Maximum Java heap in MiB (512-65536):".to_string(),
+                config.memory_mb.to_string(),
                 InputAction::SetMemory,
             ),
             Setting::Concurrency => (
-                "Download concurrency",
-                "Parallel downloads (1-64):",
-                self.config.download_concurrency.to_string(),
+                self.setting_modal_title("Download concurrency"),
+                "Parallel downloads (1-64):".to_string(),
+                config.download_concurrency.to_string(),
                 InputAction::SetConcurrency,
             ),
             Setting::DefaultVersion => (
-                "Default version",
-                "Version id (for example 1.21.4):",
+                "Default version (global)".to_string(),
+                "Version id (launcher-wide, e.g. 1.21.4):".to_string(),
                 self.config.default_version.clone().unwrap_or_default(),
                 InputAction::SetDefaultVersion,
             ),
             Setting::GameDir => (
-                "Game directory",
-                "Game directory (relative paths resolve against the root):",
-                self.config
+                self.setting_modal_title("Game directory"),
+                if version_scope {
+                    "Game directory (empty inherits; relative to root):"
+                } else {
+                    "Game directory (relative paths use root):"
+                }
+                .to_string(),
+                config
                     .game_dir
                     .as_ref()
                     .map(|path| path.display().to_string())
@@ -1429,6 +1597,34 @@ impl App {
                 };
                 self.set_status(Level::Info, message);
             }
+            InputAction::SetSettingsTarget => {
+                if value.is_empty() {
+                    self.settings_scope = SettingsScope::Global;
+                    self.instance_config = InstanceConfig::default();
+                    self.set_status(Level::Info, "Editing launcher-wide defaults.");
+                } else if !self.launcher.is_installed(&value) {
+                    self.set_status(
+                        Level::Error,
+                        format!("Version '{value}' is not installed. Install it first."),
+                    );
+                    self.modal = Some(modal);
+                } else {
+                    match self.launcher.instance_config(&value) {
+                        Ok(config) => {
+                            self.settings_scope = SettingsScope::Version(value.clone());
+                            self.instance_config = config;
+                            self.set_status(
+                                Level::Info,
+                                format!("Editing settings for version {value}."),
+                            );
+                        }
+                        Err(error) => {
+                            self.set_status(Level::Error, error.to_string());
+                            self.modal = Some(modal);
+                        }
+                    }
+                }
+            }
             InputAction::SetJava => {
                 let path = PathBuf::from(&value);
                 if value.is_empty() || !path.exists() {
@@ -1441,15 +1637,34 @@ impl App {
                 }
                 let path = path.canonicalize().unwrap_or(path);
                 let display = path.display().to_string();
-                if self.update_config(|config| config.java_path = Some(path)) {
-                    self.set_status(Level::Success, format!("Java path set to {display}."));
-                    self.detect_java();
+                let saved = path.clone();
+                let saved_ok = if self.settings_scope.is_version() {
+                    self.update_instance_config(|config| config.java_path = Some(saved))
+                } else {
+                    self.update_config(|config| config.java_path = Some(saved))
+                };
+                if saved_ok {
+                    self.set_status(
+                        Level::Success,
+                        format!("Java path{} set to {display}.", self.setting_suffix()),
+                    );
+                    if !self.settings_scope.is_version() {
+                        self.detect_java();
+                    }
                 }
             }
             InputAction::SetMemory => match value.parse::<u32>() {
                 Ok(memory) if (512..=65_536).contains(&memory) => {
-                    if self.update_config(|config| config.memory_mb = memory) {
-                        self.set_status(Level::Success, format!("Memory set to {memory} MiB."));
+                    let saved = if self.settings_scope.is_version() {
+                        self.update_instance_config(|config| config.memory_mb = Some(memory))
+                    } else {
+                        self.update_config(|config| config.memory_mb = memory)
+                    };
+                    if saved {
+                        self.set_status(
+                            Level::Success,
+                            format!("Memory{} set to {memory} MiB.", self.setting_suffix()),
+                        );
                     }
                 }
                 _ => {
@@ -1459,10 +1674,20 @@ impl App {
             },
             InputAction::SetConcurrency => match value.parse::<usize>() {
                 Ok(concurrency) if (1..=64).contains(&concurrency) => {
-                    if self.update_config(|config| config.download_concurrency = concurrency) {
+                    let saved = if self.settings_scope.is_version() {
+                        self.update_instance_config(|config| {
+                            config.download_concurrency = Some(concurrency)
+                        })
+                    } else {
+                        self.update_config(|config| config.download_concurrency = concurrency)
+                    };
+                    if saved {
                         self.set_status(
                             Level::Success,
-                            format!("Download concurrency set to {concurrency}."),
+                            format!(
+                                "Download concurrency{} set to {concurrency}.",
+                                self.setting_suffix()
+                            ),
                         );
                     }
                 }
@@ -1480,20 +1705,41 @@ impl App {
                     self.modal = Some(modal);
                 } else if self.update_config(|config| config.default_version = Some(value.clone()))
                 {
-                    self.set_status(Level::Success, format!("Default version set to {value}."));
+                    self.set_status(
+                        Level::Success,
+                        format!("Default version set to {value} (launcher-wide)."),
+                    );
                 }
             }
             InputAction::SetGameDir => {
                 if value.is_empty() {
-                    self.set_status(Level::Error, "Game directory cannot be empty.");
-                    self.modal = Some(modal);
+                    if self.settings_scope.is_version() {
+                        if self.update_instance_config(|config| config.game_dir = None) {
+                            self.set_status(
+                                Level::Success,
+                                format!(
+                                    "Game directory override{} cleared; the launcher-wide value or versions/<id> will be used.",
+                                    self.setting_suffix()
+                                ),
+                            );
+                        }
+                    } else {
+                        self.set_status(Level::Error, "Game directory cannot be empty.");
+                        self.modal = Some(modal);
+                    }
                 } else {
                     let path = PathBuf::from(&value);
                     let display = path.display().to_string();
-                    if self.update_config(|config| config.game_dir = Some(path)) {
+                    let saved_path = path.clone();
+                    let saved = if self.settings_scope.is_version() {
+                        self.update_instance_config(|config| config.game_dir = Some(saved_path))
+                    } else {
+                        self.update_config(|config| config.game_dir = Some(saved_path))
+                    };
+                    if saved {
                         self.set_status(
                             Level::Success,
-                            format!("Game directory set to {display}."),
+                            format!("Game directory{} set to {display}.", self.setting_suffix()),
                         );
                     }
                 }
@@ -1502,46 +1748,140 @@ impl App {
     }
 
     fn clear_setting(&mut self, setting: Setting) {
+        let version_scope = self.settings_scope.is_version();
+        let suffix = self.setting_suffix();
         match setting {
+            Setting::Scope => {
+                self.set_status(
+                    Level::Info,
+                    "Use Change on the Target row to switch scopes.",
+                );
+            }
             Setting::Java => {
-                if self.update_config(|config| config.java_path = None) {
+                let cleared = if version_scope {
+                    self.update_instance_config(|config| config.java_path = None)
+                } else {
+                    self.update_config(|config| config.java_path = None)
+                };
+                if cleared {
+                    let message = if version_scope {
+                        format!(
+                            "Java path{suffix} cleared; the launcher-wide value (or JAVA_HOME/PATH) will be used."
+                        )
+                    } else {
+                        "Java path cleared; JAVA_HOME/PATH will be used.".to_string()
+                    };
+                    self.set_status(Level::Success, message);
+                    if !version_scope {
+                        self.detect_java();
+                    }
+                }
+            }
+            Setting::Memory => {
+                if version_scope {
+                    if self.update_instance_config(|config| config.memory_mb = None) {
+                        self.set_status(
+                            Level::Success,
+                            format!(
+                                "Memory{suffix} cleared; the launcher-wide value will be used."
+                            ),
+                        );
+                    }
+                } else {
                     self.set_status(
-                        Level::Success,
-                        "Java path cleared; JAVA_HOME/PATH will be used.",
+                        Level::Info,
+                        "This setting cannot be cleared; edit it instead.",
                     );
-                    self.detect_java();
+                }
+            }
+            Setting::Concurrency => {
+                if version_scope {
+                    if self.update_instance_config(|config| config.download_concurrency = None) {
+                        self.set_status(
+                            Level::Success,
+                            format!(
+                                "Download concurrency{suffix} cleared; the launcher-wide value will be used."
+                            ),
+                        );
+                    }
+                } else {
+                    self.set_status(
+                        Level::Info,
+                        "This setting cannot be cleared; edit it instead.",
+                    );
                 }
             }
             Setting::DefaultVersion => {
-                if self.update_config(|config| config.default_version = None) {
+                if version_scope {
+                    self.set_status(
+                        Level::Info,
+                        "Default version is launcher-wide; switch Target to Global defaults to clear it.",
+                    );
+                } else if self.update_config(|config| config.default_version = None) {
                     self.set_status(Level::Success, "Default version cleared.");
                 }
             }
             Setting::GameDir => {
-                if self.update_config(|config| config.game_dir = None) {
-                    self.set_status(
-                        Level::Success,
-                        "Game directory cleared; the launcher root will be used.",
-                    );
+                let cleared = if version_scope {
+                    self.update_instance_config(|config| config.game_dir = None)
+                } else {
+                    self.update_config(|config| config.game_dir = None)
+                };
+                if cleared {
+                    let message = if version_scope {
+                        format!(
+                            "Game directory{suffix} cleared; the launcher-wide value or versions/<id> will be used."
+                        )
+                    } else {
+                        "Game directory cleared; each version will use its own directory unless it overrides game_dir."
+                            .to_string()
+                    };
+                    self.set_status(Level::Success, message);
                 }
             }
-            Setting::Memory | Setting::Concurrency => {}
         }
     }
 
     fn show_config(&mut self) {
-        match serde_json::to_string_pretty(&self.config) {
-            Ok(json) => {
-                self.push_log("==> [config] shccl.json");
-                self.push_log(json);
-                self.page = Page::Logs;
-                self.log_scroll = 0;
-                self.set_status(Level::Info, "Configuration written to Logs.");
+        match self.settings_scope.version().map(str::to_string) {
+            None => match serde_json::to_string_pretty(&self.config) {
+                Ok(json) => {
+                    self.push_log("==> [config] shccl.json");
+                    self.push_log(json);
+                    self.page = Page::Logs;
+                    self.log_scroll = 0;
+                    self.set_status(Level::Info, "Configuration written to Logs.");
+                }
+                Err(error) => self.set_status(
+                    Level::Error,
+                    format!("Could not serialize configuration: {error}"),
+                ),
+            },
+            Some(version) => {
+                let mut effective = self.settings_config();
+                if let Ok(game_dir) = self.launcher.game_dir(&version) {
+                    effective.game_dir = Some(game_dir);
+                }
+                let effective_json = serde_json::to_string_pretty(&effective);
+                let overrides_json = serde_json::to_string_pretty(&self.instance_config);
+                match (effective_json, overrides_json) {
+                    (Ok(effective), Ok(overrides)) => {
+                        self.push_log(format!(
+                            "==> [config] effective settings for version {version}"
+                        ));
+                        self.push_log(effective);
+                        self.push_log(format!("==> [config] versions/{version}/shccl.json"));
+                        self.push_log(overrides);
+                        self.page = Page::Logs;
+                        self.log_scroll = 0;
+                        self.set_status(Level::Info, "Configuration written to Logs.");
+                    }
+                    (Err(error), _) | (_, Err(error)) => self.set_status(
+                        Level::Error,
+                        format!("Could not serialize configuration: {error}"),
+                    ),
+                }
             }
-            Err(error) => self.set_status(
-                Level::Error,
-                format!("Could not serialize configuration: {error}"),
-            ),
         }
     }
 
