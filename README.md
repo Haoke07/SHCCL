@@ -10,8 +10,8 @@ SHCCL 采用 Cargo workspace 组织，核心逻辑与交互前端分离。当前
 | --- | --- | --- |
 | `shccl-core` | 可用 | 版本清单、版本 JSON、客户端/库/资源下载、natives 解压、离线账号、Microsoft 设备码登录与 token 刷新、Java 检测、启动命令构建与进程启动 |
 | `shccl-cli` | 可用 | 安装、离线 / Microsoft 登录、账号选择、启动、配置、诊断 |
-| `shccl-tui` | 可用 | 基于 ratatui/crossterm 的完整终端界面：仪表盘、版本安装/启动、离线账号、设置、日志与进度 |
-| `shccl-gui` | 可用 | 基于 SDL3 的完整界面：仪表盘、版本安装/启动、离线账号、设置、日志与进度 |
+| `shccl-tui` | 可用 | 基于 ratatui/crossterm 的完整终端界面：仪表盘、版本安装/启动、离线 / Microsoft 账号、设置、日志与进度 |
+| `shccl-gui` | 可用 | 基于 SDL3 的完整界面：仪表盘、版本安装/启动、离线 / Microsoft 账号、设置、日志与进度 |
 
 > 离线账号仅用于离线游戏与离线服务器；Microsoft 账号可用于正版服务器，启动前会自动刷新过期 token。
 
@@ -140,6 +140,12 @@ Microsoft 登录需要启动器自己的 Azure 应用 client ID。它是公共�
 SHCCL_MICROSOFT_CLIENT_ID=<client-id> cargo build --release -p shccl-cli
 ```
 
+TUI 与 GUI 的 Microsoft 登录也会读取同一个 client ID，发布时请一起注入：
+
+```bash
+SHCCL_MICROSOFT_CLIENT_ID=<client-id> cargo build --release -p shccl-tui -p shccl-gui
+```
+
 开发和测试时也可以在运行时覆盖：
 
 ```bash
@@ -232,7 +238,7 @@ TUI 与 CLI/GUI 功能同步，所有操作都会写入同一份 `shccl.json` �
 | --- | --- | --- |
 | Dashboard | `doctor` | Root、配置文件、Java 检测、账号、已安装版本、内存与默认版本 |
 | Versions | `versions` / `install` / `launch` | 浏览已安装版本、加载远端清单、过滤、安装、修复/校验、启动、预览启动命令、设为默认 |
-| Accounts | `login offline` / `accounts` / `select` | 添加并选中离线账号、切换当前账号 |
+| Accounts | `login offline` / `login microsoft` / `accounts` / `select` | 添加并选中离线账号、Microsoft 设备码登录、切换当前账号 |
 | Settings | `config ...` | Java 路径、内存、下载并发、默认版本、游戏目录，以及查看配置 JSON |
 | Logs | - | 安装进度、启动命令、游戏 stdout/stderr |
 
@@ -240,7 +246,7 @@ TUI 与 CLI/GUI 功能同步，所有操作都会写入同一份 `shccl.json` �
 
 - `1`–`5` 切换页面，`Tab` / `Shift+Tab` 循环切换；`↑`/`↓` 或 `j`/`k` 移动选择，`PgUp`/`PgDn` 翻页，`Home`/`End` 跳到首尾。
 - `Enter` 执行当前页面的主要操作（启动/安装/选择账号/编辑设置）；Versions 页面中 `←`/`→` 切换 Installed/Remote，`i` 安装指定版本、`l` 加载远端清单、`f` 过滤、`d` 设为默认、`p` 预览启动命令、`v` 校验并修复。
-- Accounts 页面 `a` 添加离线账号；Settings 页面 `Enter` 编辑、`c` 清除可清除项、`s` 以 JSON 输出配置到 Logs；Logs 页面 `c` 清空日志。
+- Accounts 页面 `a` 添加离线账号，`m` 使用 Microsoft 设备码登录（弹窗显示验证网址与代码，`Esc` 取消）；Settings 页面 `Enter` 编辑、`c` 清除可清除项、`s` 以 JSON 输出配置到 Logs；Logs 页面 `c` 清空日志。
 - `r` 刷新本地状态并重新检测 Java；`?` / `F1` 打开快捷键帮助；`q`/`Esc` 退出（弹窗打开时 `Esc` 关闭弹窗）。
 - 输入框支持 `Ctrl+A` 全选，`←`/`→`、`Home`/`End` 移动光标，`Enter` 保存，`Esc` 取消。
 - 鼠标滚轮可滚动列表与日志，点击页签、版本页签和列表行可切换页面或选择条目。
@@ -260,7 +266,7 @@ GUI 与 CLI 功能同步，所有操作都会写入同一份 `shccl.json` 和 `a
 | --- | --- | --- |
 | Dashboard | `doctor` | Root、配置文件、Java 检测、账号、已安装版本、内存与默认版本 |
 | Versions | `versions` / `install` / `launch` | 浏览已安装版本、加载远端清单、过滤、安装、修复/校验、启动、预览启动命令、设为默认 |
-| Accounts | `login offline` / `accounts` / `select` | 添加并选中离线账号、切换当前账号 |
+| Accounts | `login offline` / `login microsoft` / `accounts` / `select` | 添加并选中离线账号、Microsoft 设备码登录、切换当前账号 |
 | Settings | `config ...` | Java 路径、内存、下载并发、默认版本、游戏目录，以及查看配置 JSON |
 | Logs | - | 安装进度、启动命令、游戏 stdout/stderr |
 
@@ -269,7 +275,7 @@ GUI 与 CLI 功能同步，所有操作都会写入同一份 `shccl.json` 和 `a
 - 鼠标点击侧边栏、列表行和按钮；滚轮滚动列表与日志。
 - `1`–`5` 切换页面，`Tab` 循环切换；`↑`/`↓` 或 `j`/`k` 移动选择。
 - `Enter` 执行当前操作（安装/启动/选择账号）；Versions 页面中 `I` 安装指定版本、`L` 加载远端清单、`F` 过滤、`D` 设为默认、`P` 预览启动命令。
-- Accounts 页面 `A` 添加离线账号；Logs 页面 `C` 清空日志。
+- Accounts 页面 `A` 添加离线账号，`M` 或点击 `Microsoft sign-in` 使用设备码登录（弹窗显示验证网址与代码，`Esc` 或 Cancel 取消）；Logs 页面 `C` 清空日志。
 - `R` 刷新本地状态并重新检测 Java；`Q`/`Esc` 退出（弹窗打开时 `Esc` 关闭弹窗）。
 - 输入框支持 `Ctrl+A` 全选，`←`/`→`、`Home`/`End` 移动光标，`Enter` 保存。
 

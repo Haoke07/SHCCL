@@ -3,6 +3,7 @@ use sdl3::pixels::Color;
 use sdl3::render::{Canvas, FRect};
 use sdl3::ttf::{Font, TextEngine};
 use sdl3::video::Window;
+use shccl_core::DeviceCode;
 
 use crate::app::{
     Action, App, Busy, Hit, InputModal, Level, Page, ScrollTarget, Setting, VersionTab,
@@ -710,7 +711,7 @@ impl Painter<'_> {
 
         if app.accounts.accounts.is_empty() {
             self.text(
-                "No accounts yet. Add an offline account to launch Minecraft.",
+                "No accounts yet. Add an offline account or sign in with Microsoft.",
                 list.x + 8.0,
                 list.y + 6.0,
                 MUTED,
@@ -753,18 +754,23 @@ impl Painter<'_> {
         let action_y = main.y + main.h - 26.0;
         if let Some(account) = app.accounts.accounts.get(app.account_sel) {
             self.button(
-                FRect::new(main.x + 12.0, action_y, 88.0, 22.0),
+                FRect::new(main.x + 12.0, action_y, 84.0, 22.0),
                 "Use account",
                 Action::UseAccount(account.uuid.clone()),
             )?;
         }
         self.button(
-            FRect::new(main.x + 106.0, action_y, 100.0, 22.0),
+            FRect::new(main.x + 102.0, action_y, 96.0, 22.0),
             "Add offline...",
             Action::AddOffline,
         )?;
         self.button(
-            FRect::new(main.x + 212.0, action_y, 64.0, 22.0),
+            FRect::new(main.x + 204.0, action_y, 116.0, 22.0),
+            "Microsoft sign-in",
+            Action::AddMicrosoft,
+        )?;
+        self.button(
+            FRect::new(main.x + 326.0, action_y, 64.0, 22.0),
             "Refresh",
             Action::Refresh,
         )
@@ -950,6 +956,8 @@ impl Painter<'_> {
 
         let hints = if app.modal.is_some() {
             "Enter save   Esc cancel"
+        } else if app.microsoft.is_some() {
+            "Esc cancel sign-in"
         } else {
             "1-5 pages   Enter   R refresh   Q quit"
         };
@@ -1086,6 +1094,78 @@ impl Painter<'_> {
             Action::SubmitModal,
         )
     }
+
+    fn microsoft_login(&mut self, code: &DeviceCode) -> Result<()> {
+        let width = 440.0;
+        let height = 190.0;
+        let rect = FRect::new(
+            (LOGICAL_WIDTH - width) / 2.0,
+            (LOGICAL_HEIGHT - height) / 2.0,
+            width,
+            height,
+        );
+        self.fill(
+            FRect::new(rect.x + 4.0, rect.y + 4.0, rect.w, rect.h),
+            SHADOW,
+        )?;
+        self.fill(rect, PANEL)?;
+        self.outline(rect, ACCENT)?;
+
+        let max_chars = ((rect.w - 28.0) / self.char_width) as usize;
+        self.text("Microsoft sign-in", rect.x + 14.0, rect.y + 12.0, ACCENT)?;
+        self.text(
+            "1. Open this page in a browser:",
+            rect.x + 14.0,
+            rect.y + 32.0,
+            MUTED,
+        )?;
+        self.text_clipped(
+            &code.verification_uri,
+            rect.x + 20.0,
+            rect.y + 46.0,
+            max_chars.saturating_sub(6),
+            ACCENT,
+        )?;
+        self.text("2. Enter this code:", rect.x + 14.0, rect.y + 68.0, MUTED)?;
+        self.text_clipped(
+            &code.user_code,
+            rect.x + 20.0,
+            rect.y + 82.0,
+            max_chars.saturating_sub(6),
+            WARNING,
+        )?;
+        if !code.message.is_empty() {
+            self.text_clipped(
+                &code.message,
+                rect.x + 14.0,
+                rect.y + 104.0,
+                max_chars,
+                MUTED,
+            )?;
+        }
+        self.text(
+            "Waiting for Microsoft sign-in...",
+            rect.x + 14.0,
+            rect.y + 128.0,
+            ACCENT,
+        )?;
+        self.text(
+            "The account is added and selected automatically.",
+            rect.x + 14.0,
+            rect.y + 146.0,
+            MUTED,
+        )?;
+        self.button(
+            FRect::new(
+                rect.x + rect.w - 14.0 - 58.0,
+                rect.y + height - 26.0,
+                58.0,
+                20.0,
+            ),
+            "Cancel",
+            Action::CancelMicrosoft,
+        )
+    }
 }
 
 pub(crate) fn draw(
@@ -1110,7 +1190,7 @@ pub(crate) fn draw(
             hits: &mut hits,
             scroll_hits: &mut scroll_hits,
             mouse: app.mouse,
-            interactive: app.modal.is_none(),
+            interactive: app.modal.is_none() && app.microsoft.is_none(),
         };
         painter.header(app)?;
         painter.sidebar(app)?;
@@ -1125,6 +1205,10 @@ pub(crate) fn draw(
         if let Some(modal) = &app.modal {
             painter.interactive = true;
             painter.modal(modal)?;
+        }
+        if let Some(code) = &app.microsoft {
+            painter.interactive = true;
+            painter.microsoft_login(code)?;
         }
     }
 
@@ -1151,7 +1235,7 @@ fn page_hint(page: Page) -> &'static str {
     match page {
         Page::Dashboard => "Root, Java, account overview",
         Page::Versions => "Up/Down select   Enter action",
-        Page::Accounts => "Up/Down select   Enter use",
+        Page::Accounts => "Up/Down select   Enter use   M Microsoft",
         Page::Settings => "Click Set... to edit",
         Page::Logs => "Up/Down scroll   C clear",
     }

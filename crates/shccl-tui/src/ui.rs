@@ -45,6 +45,9 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     if app.modal.is_some() {
         draw_modal(frame, app);
     }
+    if app.microsoft.is_some() {
+        draw_microsoft(frame, app);
+    }
 }
 
 fn page_block(title: impl Into<Line<'static>>) -> Block<'static> {
@@ -458,7 +461,7 @@ fn draw_accounts(frame: &mut Frame, app: &mut App, area: Rect) {
         if app.accounts.accounts.is_empty() {
             frame.render_widget(
                 Paragraph::new(Line::from(Span::styled(
-                    "No accounts. Press a to add an offline account.",
+                    "No accounts. Press a to add an offline account, m to sign in with Microsoft.",
                     Style::default().fg(MUTED),
                 ))),
                 chunks[1],
@@ -710,7 +713,10 @@ fn draw_help(frame: &mut Frame) {
         help_line("Dashboard", "Enter refreshes and re-detects Java"),
         help_line("Versions", "← → switch tab · i install · l load remote"),
         help_line("", "f filter · d set default · p preview · v verify"),
-        help_line("Accounts", "a add offline account · Enter select"),
+        help_line(
+            "Accounts",
+            "a add offline account · m Microsoft sign-in · Enter select",
+        ),
         help_line("Settings", "Enter edit · c clear · s show config JSON"),
         help_line("Logs", "c clear · mouse wheel scrolls"),
         Line::from(""),
@@ -779,6 +785,56 @@ fn draw_modal(frame: &mut Frame, app: &App) {
 struct InputLine {
     line: Line<'static>,
     cursor_column: usize,
+}
+
+/// Device-code instructions shown while a Microsoft sign-in is pending.
+fn draw_microsoft(frame: &mut Frame, app: &App) {
+    let Some(code) = app.microsoft.as_ref() else {
+        return;
+    };
+    let area = centered_rect(frame.area(), 74, 11);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT))
+        .title(Line::from(Span::styled(
+            " Microsoft sign-in ",
+            Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.height == 0 {
+        return;
+    }
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            "Open this page in a browser:",
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(Span::styled(
+            code.verification_uri.clone(),
+            Style::default().fg(INFO).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Enter the code: ", Style::default().fg(Color::Gray)),
+            Span::styled(
+                code.user_code.clone(),
+                Style::default().fg(LABEL).add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ];
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Waiting for Microsoft sign-in...",
+        Style::default().fg(ACCENT),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Esc cancels the sign-in",
+        Style::default().fg(MUTED),
+    )));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Build a horizontally scrolled input line keeping the cursor visible.
@@ -861,7 +917,9 @@ fn help_text(page: Page) -> &'static str {
         Page::Versions => {
             "↑/↓ move · Enter launch/install · ←/→ tab · i install · l load remote · f filter · d default · p preview · v verify"
         }
-        Page::Accounts => "↑/↓ move · Enter select · a add offline account · ? help",
+        Page::Accounts => {
+            "↑/↓ move · Enter select · a add offline account · m Microsoft sign-in · ? help"
+        }
         Page::Settings => "↑/↓ move · Enter edit · c clear · s show config JSON · ? help",
         Page::Logs => "↑/↓ scroll · PgUp/PgDn · Home oldest · End tail · c clear · ? help",
     }

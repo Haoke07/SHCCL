@@ -11,8 +11,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEventK
 use ratatui::layout::Rect;
 use ratatui::widgets::ListState;
 use shccl_core::{
-    Account, AccountStore, InstalledVersionSummary, LaunchRequest, Launcher, LauncherConfig,
-    LogStream, ProgressEvent, ProgressSink, VersionManifest, detect_java,
+    Account, AccountStore, DeviceCode, InstalledVersionSummary, LaunchRequest, Launcher,
+    LauncherConfig, LogStream, ProgressEvent, ProgressSink, VersionManifest, detect_java,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -294,6 +294,7 @@ enum TaskKind {
     Install,
     Launch,
     Manifest,
+    Login,
 }
 
 enum BackendEvent {
@@ -319,6 +320,7 @@ enum BackendEvent {
     Running {
         version: String,
     },
+    MicrosoftCode(DeviceCode),
     TaskDone {
         task: TaskKind,
         ok: bool,
@@ -355,6 +357,8 @@ pub(crate) struct App {
     pub(crate) busy: Option<Busy>,
     pub(crate) running: Option<String>,
     pub(crate) modal: Option<InputModal>,
+    /// Pending Microsoft device-code sign-in shown as an overlay.
+    pub(crate) microsoft: Option<DeviceCode>,
     pub(crate) help: bool,
     pub(crate) quit: bool,
     /// Rows available in the current list, updated while drawing.
@@ -367,6 +371,7 @@ pub(crate) struct App {
     runtime: Handle,
     events_tx: UnboundedSender<BackendEvent>,
     events_rx: UnboundedReceiver<BackendEvent>,
+    microsoft_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -403,6 +408,7 @@ impl App {
             busy: None,
             running: None,
             modal: None,
+            microsoft: None,
             help: false,
             quit: false,
             view_rows: 10,
@@ -413,6 +419,7 @@ impl App {
             runtime,
             events_tx,
             events_rx,
+            microsoft_task: None,
         };
         app.refresh_local();
         app.detect_java();
@@ -613,6 +620,20 @@ impl App {
                 self.push_log(format!("==> [launch] Minecraft {version} is running"));
                 self.page = Page::Logs;
             }
+            BackendEvent::MicrosoftCode(code) => {
+                self.push_log(format!(
+                    "==> [auth] open {} and enter code {}",
+                    code.verification_uri, code.user_code
+                ));
+                self.set_status(
+                    Level::Info,
+                    format!(
+                        "Microsoft sign-in: enter {} at {}",
+                        code.user_code, code.verification_uri
+                    ),
+                );
+                self.microsoft = Some(code);
+            }
             BackendEvent::TaskDone { task, ok, message } => {
                 self.busy = None;
                 if !message.is_empty() {
@@ -637,6 +658,23 @@ impl App {
                     TaskKind::Manifest => {
                         if !ok {
                             self.busy = None;
+                        }
+                    }
+                    TaskKind::Login => {
+                        self.microsoft = None;
+                        self.microsoft_task = None;
+                        self.refresh_local();
+                        if ok {
+                            let selected = self.accounts.selected.clone();
+                            if let Some(index) = selected.as_deref().and_then(|uuid| {
+                                self.accounts
+                                    .accounts
+                                    .iter()
+                                    .position(|account| account.uuid == uuid)
+                            }) {
+                                self.account_sel = index;
+                            }
+                            self.page = Page::Accounts;
                         }
                     }
                 }
@@ -772,6 +810,69 @@ impl App {
                 message,
             });
         });
+    }
+
+    fn start_microsoft_login(&mut self) {
+        if !self.ensure_idle() {
+            return;
+        }
+        if self.launcher.microsoft_client_id().is_none() {
+            self.push_log(format!("!!! {}", shccl_core::microsoft::CLIENT_ID_HELP));
+            self.set_status(
+                Level::Error,
+                "Microsoft login needs an Azure client ID; details are in Logs.",
+            );
+            self.page = Page::Logs;
+            return;
+        }
+
+        self.busy = Some(Busy::new("Signing in with Microsoft"));
+        self.push_log("==> [auth] requesting a Microsoft device code");
+        self.set_status(Level::Info, "Starting Microsoft sign-in...");
+
+        let launcher = self.launcher.clone();
+        let tx = self.events_tx.clone();
+        let handle = self.runtime.spawn(async move {
+            let code = match launcher.microsoft_device_code().await {
+                Ok(code) => code,
+                Err(error) => {
+                    let _ = tx.send(BackendEvent::TaskDone {
+                        task: TaskKind::Login,
+                        ok: false,
+                        message: format!("Microsoft login failed: {error}"),
+                    });
+                    return;
+                }
+            };
+            let _ = tx.send(BackendEvent::MicrosoftCode(code.clone()));
+            let sink = App::progress_sink(tx.clone());
+            let (ok, message) = match launcher.microsoft_login(&code, &sink).await {
+                Ok(account) => (
+                    true,
+                    format!(
+                        "Microsoft account '{}' signed in and selected.",
+                        account.username
+                    ),
+                ),
+                Err(error) => (false, format!("Microsoft login failed: {error}")),
+            };
+            let _ = tx.send(BackendEvent::TaskDone {
+                task: TaskKind::Login,
+                ok,
+                message,
+            });
+        });
+        self.microsoft_task = Some(handle);
+    }
+
+    fn cancel_microsoft_login(&mut self) {
+        if let Some(handle) = self.microsoft_task.take() {
+            handle.abort();
+        }
+        if self.microsoft.take().is_some() {
+            self.busy = None;
+            self.set_status(Level::Info, "Microsoft sign-in cancelled.");
+        }
     }
 
     fn start_launch(&mut self, version: String) {
@@ -917,6 +1018,9 @@ impl App {
         if self.modal.is_some() {
             return;
         }
+        if self.microsoft.is_some() {
+            return;
+        }
         match kind {
             MouseEventKind::ScrollUp => self.move_selection(-3),
             MouseEventKind::ScrollDown => self.move_selection(3),
@@ -975,6 +1079,12 @@ impl App {
         }
         if self.modal.is_some() {
             self.handle_modal_key(key);
+            return;
+        }
+        if self.microsoft.is_some() {
+            if key.code == KeyCode::Esc {
+                self.cancel_microsoft_login();
+            }
             return;
         }
 
@@ -1091,8 +1201,10 @@ impl App {
     }
 
     fn handle_accounts_key(&mut self, code: KeyCode) {
-        if matches!(code, KeyCode::Char('a') | KeyCode::Char('A')) {
-            self.open_login_modal();
+        match code {
+            KeyCode::Char('a') | KeyCode::Char('A') => self.open_login_modal(),
+            KeyCode::Char('m') | KeyCode::Char('M') => self.start_microsoft_login(),
+            _ => {}
         }
     }
 

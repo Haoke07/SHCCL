@@ -5,8 +5,8 @@ use std::time::Instant;
 use sdl3::keyboard::{Keycode, Mod};
 use sdl3::render::FRect;
 use shccl_core::{
-    Account, AccountStore, InstalledVersionSummary, LaunchRequest, Launcher, LauncherConfig,
-    LogStream, ProgressEvent, ProgressSink, VersionManifest, detect_java,
+    Account, AccountStore, DeviceCode, InstalledVersionSummary, LaunchRequest, Launcher,
+    LauncherConfig, LogStream, ProgressEvent, ProgressSink, VersionManifest, detect_java,
 };
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -208,6 +208,8 @@ pub(crate) enum Action {
     SelectAccount(usize),
     UseAccount(String),
     AddOffline,
+    AddMicrosoft,
+    CancelMicrosoft,
     EditSetting(Setting),
     ClearSetting(Setting),
     ShowConfig,
@@ -221,6 +223,7 @@ enum TaskKind {
     Install,
     Launch,
     Manifest,
+    Login,
 }
 
 enum BackendEvent {
@@ -246,6 +249,7 @@ enum BackendEvent {
     Running {
         version: String,
     },
+    MicrosoftCode(DeviceCode),
     TaskDone {
         task: TaskKind,
         ok: bool,
@@ -275,6 +279,8 @@ pub(crate) struct App {
     pub(crate) busy: Option<Busy>,
     pub(crate) running: Option<String>,
     pub(crate) modal: Option<InputModal>,
+    /// Pending Microsoft device-code sign-in shown as an overlay.
+    pub(crate) microsoft: Option<DeviceCode>,
     pub(crate) mouse: (f32, f32),
     pub(crate) hits: Vec<Hit>,
     pub(crate) scroll_hits: Vec<(FRect, ScrollTarget)>,
@@ -284,6 +290,7 @@ pub(crate) struct App {
     runtime: Handle,
     events_tx: UnboundedSender<BackendEvent>,
     events_rx: UnboundedReceiver<BackendEvent>,
+    microsoft_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl App {
@@ -316,6 +323,7 @@ impl App {
             busy: None,
             running: None,
             modal: None,
+            microsoft: None,
             mouse: (0.0, 0.0),
             hits: Vec::new(),
             scroll_hits: Vec::new(),
@@ -324,6 +332,7 @@ impl App {
             runtime,
             events_tx,
             events_rx,
+            microsoft_task: None,
         };
         app.refresh_local();
         app.detect_java();
@@ -514,6 +523,20 @@ impl App {
                 self.push_log(format!("==> [launch] Minecraft {version} is running"));
                 self.page = Page::Logs;
             }
+            BackendEvent::MicrosoftCode(code) => {
+                self.push_log(format!(
+                    "==> [auth] open {} and enter code {}",
+                    code.verification_uri, code.user_code
+                ));
+                self.set_status(
+                    Level::Info,
+                    format!(
+                        "Microsoft sign-in: enter {} at {}",
+                        code.user_code, code.verification_uri
+                    ),
+                );
+                self.microsoft = Some(code);
+            }
             BackendEvent::TaskDone { task, ok, message } => {
                 self.busy = None;
                 if !message.is_empty() {
@@ -538,6 +561,28 @@ impl App {
                     TaskKind::Manifest => {
                         if !ok {
                             self.busy = None;
+                        }
+                    }
+                    TaskKind::Login => {
+                        self.microsoft = None;
+                        self.microsoft_task = None;
+                        self.refresh_local();
+                        if ok {
+                            let selected = self.accounts.selected.clone();
+                            if let Some(index) = selected.as_deref().and_then(|uuid| {
+                                self.accounts
+                                    .accounts
+                                    .iter()
+                                    .position(|account| account.uuid == uuid)
+                            }) {
+                                self.account_sel = index;
+                                ensure_visible(
+                                    self.account_sel,
+                                    &mut self.account_scroll,
+                                    ACCOUNT_ROWS,
+                                );
+                            }
+                            self.page = Page::Accounts;
                         }
                     }
                 }
@@ -674,6 +719,69 @@ impl App {
                 message,
             });
         });
+    }
+
+    fn start_microsoft_login(&mut self) {
+        if !self.ensure_idle() {
+            return;
+        }
+        if self.launcher.microsoft_client_id().is_none() {
+            self.push_log(format!("!!! {}", shccl_core::microsoft::CLIENT_ID_HELP));
+            self.set_status(
+                Level::Error,
+                "Microsoft login needs an Azure client ID; details are in Logs.",
+            );
+            self.page = Page::Logs;
+            return;
+        }
+
+        self.busy = Some(Busy::new("Signing in with Microsoft"));
+        self.push_log("==> [auth] requesting a Microsoft device code");
+        self.set_status(Level::Info, "Starting Microsoft sign-in...");
+
+        let launcher = self.launcher.clone();
+        let tx = self.events_tx.clone();
+        let handle = self.runtime.spawn(async move {
+            let code = match launcher.microsoft_device_code().await {
+                Ok(code) => code,
+                Err(error) => {
+                    let _ = tx.send(BackendEvent::TaskDone {
+                        task: TaskKind::Login,
+                        ok: false,
+                        message: format!("Microsoft login failed: {error}"),
+                    });
+                    return;
+                }
+            };
+            let _ = tx.send(BackendEvent::MicrosoftCode(code.clone()));
+            let sink = App::progress_sink(tx.clone());
+            let (ok, message) = match launcher.microsoft_login(&code, &sink).await {
+                Ok(account) => (
+                    true,
+                    format!(
+                        "Microsoft account '{}' signed in and selected.",
+                        account.username
+                    ),
+                ),
+                Err(error) => (false, format!("Microsoft login failed: {error}")),
+            };
+            let _ = tx.send(BackendEvent::TaskDone {
+                task: TaskKind::Login,
+                ok,
+                message,
+            });
+        });
+        self.microsoft_task = Some(handle);
+    }
+
+    fn cancel_microsoft_login(&mut self) {
+        if let Some(handle) = self.microsoft_task.take() {
+            handle.abort();
+        }
+        if self.microsoft.take().is_some() {
+            self.busy = None;
+            self.set_status(Level::Info, "Microsoft sign-in cancelled.");
+        }
     }
 
     fn start_launch(&mut self, version: String) {
@@ -894,6 +1002,12 @@ impl App {
             self.handle_modal_key(keycode, keymod);
             return;
         }
+        if self.microsoft.is_some() {
+            if keycode == Keycode::Escape {
+                self.cancel_microsoft_login();
+            }
+            return;
+        }
 
         match keycode {
             Keycode::Escape | Keycode::Q => self.quit = true,
@@ -1009,8 +1123,10 @@ impl App {
     }
 
     fn handle_accounts_key(&mut self, keycode: Keycode) {
-        if keycode == Keycode::A {
-            self.open_login_modal();
+        match keycode {
+            Keycode::A => self.open_login_modal(),
+            Keycode::M => self.start_microsoft_login(),
+            _ => {}
         }
     }
 
@@ -1462,6 +1578,8 @@ impl App {
             }
             Action::UseAccount(query) => self.select_account(&query),
             Action::AddOffline => self.open_login_modal(),
+            Action::AddMicrosoft => self.start_microsoft_login(),
+            Action::CancelMicrosoft => self.cancel_microsoft_login(),
             Action::EditSetting(setting) => self.open_setting_modal(setting),
             Action::ClearSetting(setting) => self.clear_setting(setting),
             Action::ShowConfig => self.show_config(),

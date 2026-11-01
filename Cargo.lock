@@ -1566,7 +1566,7 @@ dependencies = [
 
 [[package]]
 name = "shccl-cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1578,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "shccl-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "futures-util",
  "md-5",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "shccl-gui"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "sdl3",
@@ -1605,7 +1605,7 @@ dependencies = [
 
 [[package]]
 name = "shccl-tui"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "crossterm",
