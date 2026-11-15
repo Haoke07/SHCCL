@@ -194,6 +194,9 @@ pub struct Library {
     pub extract: Option<Extract>,
 }
 
+/// Size of the empty ZIP archive Mojang uses as a placeholder artifact.
+const EMPTY_JAR_SIZE: u64 = 22;
+
 impl Library {
     pub fn is_allowed(&self, features: &HashMap<String, bool>) -> bool {
         rules_allow(&self.rules, features)
@@ -201,6 +204,18 @@ impl Library {
 
     pub fn artifact(&self) -> Option<&DownloadInfo> {
         self.downloads.artifact.as_ref()
+    }
+
+    /// Whether the main artifact is an empty placeholder rather than real code.
+    ///
+    /// A few legacy entries (for example `lwjgl-platform` in 1.12.2) point at
+    /// a 22-byte empty JAR so the classpath entry exists, while the actual
+    /// classes live in another library and the native files live in a
+    /// classifier. Some third-party launchers never download that placeholder.
+    pub fn is_placeholder_artifact(&self) -> bool {
+        self.artifact()
+            .and_then(|artifact| artifact.size)
+            .is_some_and(|size| size <= EMPTY_JAR_SIZE)
     }
 
     pub fn artifact_path(&self) -> Option<PathBuf> {
@@ -489,6 +504,23 @@ mod tests {
                 .to_string_lossy(),
             "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3-natives-linux.zip"
         );
+    }
+
+    #[test]
+    fn empty_placeholder_artifacts_are_recognized() {
+        let placeholder: Library = serde_json::from_value(json!({
+            "name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209",
+            "downloads": { "artifact": { "size": 22 } }
+        }))
+        .unwrap();
+        assert!(placeholder.is_placeholder_artifact());
+
+        let real: Library = serde_json::from_value(json!({
+            "name": "example:library:1.0",
+            "downloads": { "artifact": { "size": 1024 } }
+        }))
+        .unwrap();
+        assert!(!real.is_placeholder_artifact());
     }
 
     #[test]

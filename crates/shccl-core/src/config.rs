@@ -25,6 +25,10 @@ pub struct LauncherConfig {
     pub game_dir: Option<PathBuf>,
     /// Number of parallel downloads.
     pub download_concurrency: usize,
+    /// Prepare and verify library files before launching. Missing files are
+    /// completed automatically when possible; disabling this skips both steps
+    /// and lets launch proceed even when files are missing.
+    pub check_files: bool,
 }
 
 impl Default for LauncherConfig {
@@ -37,6 +41,7 @@ impl Default for LauncherConfig {
             default_version: None,
             game_dir: None,
             download_concurrency: 12,
+            check_files: true,
         }
     }
 }
@@ -89,6 +94,9 @@ pub struct InstanceConfig {
     /// Number of parallel downloads used when installing this version.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub download_concurrency: Option<usize>,
+    /// Whether to verify library files before launching.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_files: Option<bool>,
 }
 
 impl InstanceConfig {
@@ -112,6 +120,7 @@ impl InstanceConfig {
             && self.game_args.is_none()
             && self.game_dir.is_none()
             && self.download_concurrency.is_none()
+            && self.check_files.is_none()
     }
 
     /// Apply these overrides to the launcher-wide settings.
@@ -132,6 +141,7 @@ impl InstanceConfig {
             download_concurrency: self
                 .download_concurrency
                 .unwrap_or(base.download_concurrency),
+            check_files: self.check_files.unwrap_or(base.check_files),
         }
     }
 }
@@ -150,6 +160,7 @@ mod tests {
             default_version: Some("1.21.4".into()),
             game_dir: Some(PathBuf::from("shared")),
             download_concurrency: 12,
+            check_files: false,
         };
         let instance = InstanceConfig {
             java_path: None,
@@ -158,6 +169,7 @@ mod tests {
             game_args: Some(vec!["--instance".into()]),
             game_dir: Some(PathBuf::from("shared")),
             download_concurrency: None,
+            check_files: Some(true),
         };
 
         let merged = instance.apply_to(&base);
@@ -168,6 +180,7 @@ mod tests {
         assert_eq!(merged.default_version, base.default_version);
         assert_eq!(merged.game_dir, base.game_dir);
         assert_eq!(merged.download_concurrency, 12);
+        assert!(merged.check_files);
     }
 
     #[test]
@@ -179,6 +192,7 @@ mod tests {
         let merged = InstanceConfig::default().apply_to(&base);
         assert_eq!(merged.memory_mb, 2048);
         assert_eq!(merged.download_concurrency, base.download_concurrency);
+        assert_eq!(merged.check_files, base.check_files);
         assert!(merged.game_dir.is_none());
     }
 }

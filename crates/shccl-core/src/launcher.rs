@@ -11,12 +11,18 @@ use crate::launch::{self, LaunchHandle, LaunchPlan, LaunchRequest};
 use crate::microsoft::{self, DeviceCode, MicrosoftAuth};
 use crate::paths::{LauncherPaths, validate_version_id};
 use crate::progress::{Phase, ProgressEvent, ProgressSink};
-use crate::util::{read_json, read_lock, write_json, write_lock};
+use crate::util::{read_json, read_lock, write_bytes_atomic, write_json, write_lock};
 use crate::version::{AssetIndex, VersionDetails, VersionManifest};
 
 const VERSION_MANIFEST_URL: &str =
     "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const RESOURCES_BASE_URL: &str = "https://resources.download.minecraft.net";
+
+/// Contents of the empty ZIP archive Mojang publishes as a placeholder JAR.
+const EMPTY_JAR: [u8; 22] = [
+    0x50, 0x4b, 0x05, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
 
 struct Inner {
     paths: LauncherPaths,
@@ -501,6 +507,9 @@ impl Launcher {
         request.account = self.refresh_account(&request.account).await?;
         let details = self.load_installed_details(&request.version_id, &mut HashSet::new())?;
         let config = self.effective_config(&request.version_id)?;
+        if config.check_files {
+            self.prepare_launch_files(&details, &request.version_id)?;
+        }
         let java_path = request
             .java_path
             .clone()
@@ -525,6 +534,9 @@ impl Launcher {
         }
         let details = self.load_installed_details(&request.version_id, &mut HashSet::new())?;
         let config = self.effective_config(&request.version_id)?;
+        if config.check_files {
+            self.prepare_launch_files(&details, &request.version_id)?;
+        }
         let java_path = request
             .java_path
             .clone()
@@ -611,6 +623,66 @@ impl Launcher {
         };
         visited.remove(version_id);
         Ok(merged)
+    }
+
+    /// Complete files that third-party launchers commonly leave out so an
+    /// existing installation can be launched without a reinstall.
+    ///
+    /// This recreates empty placeholder JARs referenced by the version JSON
+    /// and extracts native archives that are present under `libraries/` into
+    /// SHCCL's own `natives` directory (for example an HMCL-installed version
+    /// stores them in `natives-linux-x86_64` instead).
+    fn prepare_launch_files(&self, details: &VersionDetails, version_id: &str) -> Result<()> {
+        let features = HashMap::new();
+
+        for library in details.classpath_libraries(&features) {
+            let Some(relative) = library.artifact_path() else {
+                continue;
+            };
+            let path = self.inner.paths.libraries_dir().join(&relative);
+            if !path.exists() && library.is_placeholder_artifact() {
+                write_bytes_atomic(&path, &EMPTY_JAR)?;
+            }
+        }
+
+        let natives_dir = self.inner.paths.natives_dir(version_id);
+        if directory_has_entries(&natives_dir) {
+            return Ok(());
+        }
+
+        let mut archives = Vec::new();
+        for library in &details.libraries {
+            if !library.is_allowed(&features) {
+                continue;
+            }
+            let Some((_classifier, artifact)) = library.native_artifact() else {
+                continue;
+            };
+            let Some(relative) = artifact.path else {
+                continue;
+            };
+            let archive = self.inner.paths.libraries_dir().join(relative);
+            if archive.exists() {
+                archives.push((
+                    archive,
+                    library
+                        .extract
+                        .as_ref()
+                        .map(|extract| extract.exclude.clone())
+                        .unwrap_or_default(),
+                ));
+            }
+        }
+
+        if archives.is_empty() {
+            return Ok(());
+        }
+
+        std::fs::create_dir_all(&natives_dir)?;
+        for (archive, excludes) in archives {
+            extract_zip(&archive, &natives_dir, &excludes)?;
+        }
+        Ok(())
     }
 
     async fn install_assets(
@@ -744,6 +816,12 @@ struct NativeArchive {
     excludes: Vec<String>,
 }
 
+fn directory_has_entries(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
 fn extract_zip(archive: &Path, destination: &Path, excludes: &[String]) -> Result<()> {
     let file = std::fs::File::open(archive)?;
     let mut archive = zip::ZipArchive::new(file)?;
@@ -793,6 +871,69 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique)
+    }
+
+    #[test]
+    fn launch_files_are_completed_for_externally_managed_installs() {
+        use std::io::Write;
+
+        let Some(os) = crate::version::current_os() else {
+            return;
+        };
+        let classifier = match os {
+            "linux" => "natives-linux",
+            "windows" => "natives-windows",
+            "osx" => "natives-osx",
+            _ => return,
+        };
+
+        let root = temp_root("prepare");
+        let launcher = Launcher::new(Some(root.clone())).unwrap();
+        let paths = launcher.paths();
+
+        let artifact = "org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209.jar";
+        let native = format!(
+            "org/lwjgl/lwjgl/lwjgl-platform/2.9.4-nightly-20150209/lwjgl-platform-2.9.4-nightly-20150209-{classifier}.jar"
+        );
+
+        let archive = paths.libraries_dir().join(&native);
+        std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        {
+            let file = std::fs::File::create(&archive).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("libtest.so", options).unwrap();
+            zip.write_all(b"native").unwrap();
+            zip.start_file("META-INF/MANIFEST.MF", options).unwrap();
+            zip.write_all(b"manifest").unwrap();
+            zip.finish().unwrap();
+        }
+
+        let mut value = serde_json::json!({
+            "id": "legacy",
+            "libraries": [{
+                "name": "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209",
+                "downloads": {
+                    "artifact": { "path": artifact, "size": 22 },
+                    "classifiers": {}
+                },
+                "natives": {},
+                "extract": { "exclude": ["META-INF/"] }
+            }]
+        });
+        value["libraries"][0]["downloads"]["classifiers"][classifier] =
+            serde_json::json!({ "path": native });
+        value["libraries"][0]["natives"][os] = serde_json::json!(classifier);
+        let details: VersionDetails = serde_json::from_value(value).unwrap();
+
+        launcher.prepare_launch_files(&details, "legacy").unwrap();
+
+        let placeholder = paths.libraries_dir().join(artifact);
+        assert_eq!(std::fs::read(&placeholder).unwrap(), EMPTY_JAR);
+        assert!(paths.natives_dir("legacy").join("libtest.so").exists());
+        assert!(!paths.natives_dir("legacy").join("META-INF").exists());
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

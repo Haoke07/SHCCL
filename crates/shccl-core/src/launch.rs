@@ -113,7 +113,7 @@ pub(crate) fn build_plan(
             Error::Launch(format!("library '{}' has no artifact path", library.name))
         })?;
         let path = paths.libraries_dir().join(&relative);
-        if !path.exists() {
+        if !path.exists() && config.check_files {
             return Err(Error::Launch(format!(
                 "missing library {}; reinstall version '{}'",
                 relative.display(),
@@ -485,6 +485,61 @@ mod tests {
         assert!(joined.contains(library.to_string_lossy().as_ref()));
         assert!(!joined.contains("${"));
         assert_eq!(plan.working_dir, paths.version_game_dir("test"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_checks_can_be_disabled_for_externally_managed_installs() {
+        let unique = format!(
+            "shccl-launch-check-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let paths = LauncherPaths::resolve(Some(root.clone()));
+        paths.ensure().unwrap();
+
+        let details: VersionDetails = serde_json::from_value(serde_json::json!({
+            "id": "test",
+            "mainClass": "net.minecraft.client.main.Main",
+            "libraries": [{
+                "name": "example:missing:1.0",
+                "downloads": {
+                    "artifact": {
+                        "path": "example/missing/1.0/missing-1.0.jar",
+                        "size": 1024
+                    }
+                }
+            }]
+        }))
+        .unwrap();
+
+        std::fs::create_dir_all(paths.version_dir("test")).unwrap();
+        std::fs::write(paths.version_jar("test"), b"jar").unwrap();
+
+        let request = LaunchRequest::new("test", Account::offline("Steve").unwrap());
+        let java = JavaRuntime {
+            path: PathBuf::from("java"),
+            major: 21,
+            version: "21.0.2".into(),
+        };
+
+        let checked = LauncherConfig::default();
+        assert!(
+            build_plan(&paths, &details, &request, &checked, &java).is_err(),
+            "missing libraries must be reported when checks are enabled"
+        );
+
+        let unchecked = LauncherConfig {
+            check_files: false,
+            ..LauncherConfig::default()
+        };
+        let plan = build_plan(&paths, &details, &request, &unchecked, &java).unwrap();
+        assert!(plan.args.join(" ").contains("missing-1.0.jar"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

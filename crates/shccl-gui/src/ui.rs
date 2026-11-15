@@ -788,17 +788,19 @@ impl Painter<'_> {
         let x = main.x + 12.0;
         let width = main.w - 24.0;
         let mut y = main.y + 28.0;
+        let count = Setting::ALL.len() as f32;
+        let step = ((main.h - 56.0) / count).min(40.0);
 
         for setting in Setting::ALL {
             let value = app.setting_value(setting);
             self.setting_row(
-                FRect::new(x, y, width, 36.0),
+                FRect::new(x, y, width, step - 2.0),
                 setting.label(),
                 &value,
                 setting,
                 app.settings_scope.is_version(),
             )?;
-            y += 40.0;
+            y += step;
         }
 
         let action_y = main.y + main.h - 24.0;

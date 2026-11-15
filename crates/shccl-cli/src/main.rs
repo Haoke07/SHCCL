@@ -145,6 +145,15 @@ enum ConfigAction {
     SetMemory { mb: u32 },
     /// Set parallel download count (1-64).
     SetConcurrency { value: usize },
+    /// Enable or disable library file checks before launch.
+    SetCheckFiles {
+        /// `true` checks and reports missing files; `false` launches anyway.
+        #[arg(
+            action = clap::ArgAction::Set,
+            value_parser = clap::builder::BoolishValueParser::new()
+        )]
+        enabled: bool,
+    },
     /// Set the version used when `launch` has no argument.
     SetDefaultVersion {
         /// Version id, for example 1.21.4.
@@ -516,6 +525,22 @@ fn config(launcher: &Launcher, version: Option<&str>, action: ConfigAction) -> R
                 }
             }
             println!("Download concurrency{suffix} set to {value}.");
+        }
+        ConfigAction::SetCheckFiles { enabled } => {
+            match version {
+                Some(version) => {
+                    launcher.update_instance_config(version, |config| {
+                        config.check_files = Some(enabled)
+                    })?;
+                }
+                None => {
+                    launcher.update_config(|config| config.check_files = enabled)?;
+                }
+            }
+            println!(
+                "File checks{suffix} {}.",
+                if enabled { "enabled" } else { "disabled" }
+            );
         }
         ConfigAction::SetDefaultVersion { id: default } => {
             if version.is_some() {

@@ -145,7 +145,8 @@ shccl config reset --version 1.21.4
   "game_args": [],
   "default_version": "1.21.4",
   "game_dir": null,
-  "download_concurrency": 12
+  "download_concurrency": 12,
+  "check_files": true
 }
 ```
 
@@ -154,11 +155,19 @@ shccl config reset --version 1.21.4
 ```json
 {
   "memory_mb": 8192,
-  "game_dir": "/games/shared"
+  "game_dir": "/games/shared",
+  "check_files": false
 }
 ```
 
 `game_dir` 为空时不会再把 launcher root 当作所有版本的游戏目录，而是使用该版本自己的 `versions/<version_id>`。已有的 `saves`、`resourcepacks`、`options.txt` 如需继续复用，可以把全局或版本级 `game_dir` 指向原目录。
+
+`check_files` 默认开启。启动前 SHCCL 会自动补全可以本地重建的文件（例如 Mojang 的空占位 JAR，以及从 `libraries` 中的 natives 归档解压缺失的 natives），然后校验版本所需的库文件。设为 `false` 时会同时跳过自动补全与校验并继续启动，适合由其它启动器维护、且不需要 SHCCL 改动的安装目录：
+
+```bash
+shccl config set-check-files false
+shccl config set-check-files true --version 1.12.2
+```
 
 TUI 与 GUI 的 Settings 页面顶部有 `Target` 行，可在 Global defaults 和已安装版本之间切换；选中版本后编辑的设置写入 `versions/<id>/shccl.json`，其余版本不受影响。`Default version` 始终是全局设置。
 
@@ -279,7 +288,7 @@ TUI 与 CLI/GUI 功能同步：全局设置和账号共享同一份 `shccl.json`
 | Dashboard | `doctor` | Root、配置文件、Java 检测、账号、已安装版本、内存与默认版本 |
 | Versions | `versions` / `install` / `launch` | 浏览已安装版本、加载远端清单、过滤、安装、修复/校验、启动、预览启动命令、设为默认 |
 | Accounts | `login offline` / `login microsoft` / `accounts` / `select` | 添加并选中离线账号、Microsoft 设备码登录、切换当前账号 |
-| Settings | `config ...` | 选择全局默认值或某个已安装版本，编辑 Java 路径、内存、下载并发、游戏目录，并查看配置 JSON；默认版本为全局设置 |
+| Settings | `config ...` | 选择全局默认值或某个已安装版本，编辑 Java 路径、内存、下载并发、文件检查、游戏目录，并查看配置 JSON；默认版本为全局设置 |
 | Logs | - | 安装进度、启动命令、游戏 stdout/stderr |
 
 操作方式：
@@ -307,7 +316,7 @@ GUI 与 CLI 功能同步：全局设置和账号共享同一份 `shccl.json`、`
 | Dashboard | `doctor` | Root、配置文件、Java 检测、账号、已安装版本、内存与默认版本 |
 | Versions | `versions` / `install` / `launch` | 浏览已安装版本、加载远端清单、过滤、安装、修复/校验、启动、预览启动命令、设为默认 |
 | Accounts | `login offline` / `login microsoft` / `accounts` / `select` | 添加并选中离线账号、Microsoft 设备码登录、切换当前账号 |
-| Settings | `config ...` | 选择全局默认值或某个已安装版本，编辑 Java 路径、内存、下载并发、游戏目录，并查看配置 JSON；默认版本为全局设置 |
+| Settings | `config ...` | 选择全局默认值或某个已安装版本，编辑 Java 路径、内存、下载并发、文件检查、游戏目录，并查看配置 JSON；默认版本为全局设置 |
 | Logs | - | 安装进度、启动命令、游戏 stdout/stderr |
 
 操作方式：

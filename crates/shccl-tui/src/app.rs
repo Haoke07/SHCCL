@@ -119,16 +119,18 @@ pub(crate) enum Setting {
     Java,
     Memory,
     Concurrency,
+    CheckFiles,
     DefaultVersion,
     GameDir,
 }
 
 impl Setting {
-    pub(crate) const ALL: [Setting; 6] = [
+    pub(crate) const ALL: [Setting; 7] = [
         Setting::Scope,
         Setting::Java,
         Setting::Memory,
         Setting::Concurrency,
+        Setting::CheckFiles,
         Setting::DefaultVersion,
         Setting::GameDir,
     ];
@@ -139,6 +141,7 @@ impl Setting {
             Setting::Java => "Java path",
             Setting::Memory => "Memory",
             Setting::Concurrency => "Download concurrency",
+            Setting::CheckFiles => "File checks",
             Setting::DefaultVersion => "Default version",
             Setting::GameDir => "Game directory",
         }
@@ -149,7 +152,7 @@ impl Setting {
             Setting::Scope => false,
             Setting::DefaultVersion => !version_scope,
             Setting::Java | Setting::GameDir => true,
-            Setting::Memory | Setting::Concurrency => version_scope,
+            Setting::Memory | Setting::Concurrency | Setting::CheckFiles => version_scope,
         }
     }
 }
@@ -197,6 +200,7 @@ pub(crate) enum InputAction {
     SetJava,
     SetMemory,
     SetConcurrency,
+    SetCheckFiles,
     SetDefaultVersion,
     SetGameDir,
 }
@@ -594,6 +598,13 @@ impl App {
                 .unwrap_or_else(|| "(JAVA_HOME / PATH)".to_string()),
             Setting::Memory => format!("{} MiB", config.memory_mb),
             Setting::Concurrency => config.download_concurrency.to_string(),
+            Setting::CheckFiles => {
+                if config.check_files {
+                    "enabled".to_string()
+                } else {
+                    "disabled".to_string()
+                }
+            }
             Setting::DefaultVersion => self
                 .config
                 .default_version
@@ -1559,6 +1570,12 @@ impl App {
                 config.download_concurrency.to_string(),
                 InputAction::SetConcurrency,
             ),
+            Setting::CheckFiles => (
+                self.setting_modal_title("File checks"),
+                "Check library files before launch (true/false):".to_string(),
+                config.check_files.to_string(),
+                InputAction::SetCheckFiles,
+            ),
             Setting::DefaultVersion => (
                 "Default version (global)".to_string(),
                 "Version id (launcher-wide, e.g. 1.21.4):".to_string(),
@@ -1746,6 +1763,29 @@ impl App {
                     self.modal = Some(modal);
                 }
             },
+            InputAction::SetCheckFiles => match parse_boolish(&value) {
+                Some(enabled) => {
+                    let saved = if self.settings_scope.is_version() {
+                        self.update_instance_config(|config| config.check_files = Some(enabled))
+                    } else {
+                        self.update_config(|config| config.check_files = enabled)
+                    };
+                    if saved {
+                        self.set_status(
+                            Level::Success,
+                            format!(
+                                "File checks{} {}.",
+                                self.setting_suffix(),
+                                if enabled { "enabled" } else { "disabled" }
+                            ),
+                        );
+                    }
+                }
+                None => {
+                    self.set_status(Level::Error, "File checks must be true or false.");
+                    self.modal = Some(modal);
+                }
+            },
             InputAction::SetDefaultVersion => {
                 if value.is_empty() {
                     self.set_status(Level::Error, "Version id cannot be empty.");
@@ -1856,6 +1896,23 @@ impl App {
                     );
                 }
             }
+            Setting::CheckFiles => {
+                if version_scope {
+                    if self.update_instance_config(|config| config.check_files = None) {
+                        self.set_status(
+                            Level::Success,
+                            format!(
+                                "File checks{suffix} cleared; the launcher-wide value will be used."
+                            ),
+                        );
+                    }
+                } else {
+                    self.set_status(
+                        Level::Info,
+                        "This setting cannot be cleared; edit it instead.",
+                    );
+                }
+            }
             Setting::DefaultVersion => {
                 if version_scope {
                     self.set_status(
@@ -1933,6 +1990,14 @@ impl App {
 
 fn contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && y >= rect.y && x < rect.x + rect.width && y < rect.y + rect.height
+}
+
+fn parse_boolish(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn step(current: usize, delta: isize, len: usize) -> usize {
